@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jellyfish</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <canvas id="sea" aria-label="ASCII jellyfish drifting through a dark ocean"></canvas>
+
+  <!-- Info panel: shown when a jellyfish is zoomed in on (double-click).
+       Filled in by jellyfish.js from the INFO data. -->
+  <aside id="info" class="info" hidden aria-live="polite"></aside>
+
+  <!-- Scene navigation: ↑ / ↓ between surface, open water and seabed.
+       Filled in by jellyfish.js. -->
+  <nav id="scene-nav" class="scene-nav" aria-label="Depth"></nav>
+
+  <script src="jellyfish.js"></script>
+</body>
+</html>

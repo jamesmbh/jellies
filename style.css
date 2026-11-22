@@ -1,0 +1,203 @@
+html, body {
+  margin: 0;
+  height: 100%;
+  background: #000;
+  overflow: hidden;
+}
+
+#sea {
+  display: block;
+  position: fixed;
+  inset: 0;
+}
+
+/* =========================================================
+   Info panel (shown when a jellyfish is zoomed in on)
+   Everything about its look lives here — restyle freely.
+   --accent is set from the jellyfish's colour by jellyfish.js
+   ========================================================= */
+
+.info {
+  --accent: hsl(190, 80%, 65%);
+  --text: #d8e4ee;
+  --muted: #8fa3b5;
+  --panel: rgba(4, 10, 20, 0.72);
+
+  position: fixed;
+  left: 4vw;
+  top: 50%;
+  width: min(36vw, 460px);
+  max-height: 88vh;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 24px 26px;
+
+  font-family: Consolas, "SF Mono", Menlo, "Courier New", monospace;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 10px;
+  backdrop-filter: blur(4px);
+
+  opacity: 0;
+  transform: translate(-12px, -50%);
+  transition: opacity 0.5s ease, transform 0.5s ease;
+}
+.info.show {
+  opacity: 1;
+  transform: translate(0, -50%);
+}
+.info[hidden] { display: none; }
+
+.info__close {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 18px;
+  cursor: pointer;
+}
+.info__close:hover { color: var(--accent); }
+
+/* the five groups as buttons — click one to switch to that group's
+   jellyfish; the current one is highlighted */
+.info__sections {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 18px;
+  padding: 0;
+  list-style: none;
+}
+.info__sections button {
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  background: none;
+  border: 1px solid #2a3a4a;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s, background 0.2s;
+}
+.info__sections button:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.info__sections button.is-current {
+  color: #000;
+  background: var(--accent);
+  border-color: var(--accent);
+  cursor: default;
+}
+
+.info__eyebrow {
+  margin: 0;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.info h2 {
+  margin: 4px 0 2px;
+  font-size: 24px;
+  font-weight: 600;
+  color: #fff;
+}
+.info__latin {
+  margin: 0 0 12px;
+  font-style: italic;
+  color: var(--muted);
+}
+.info p { margin: 0 0 12px; }
+
+.info__stats {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 14px;
+  margin: 0 0 14px;
+}
+.info__stats dt { color: var(--muted); }
+.info__stats dd { margin: 0; }
+
+.info ul.info__features {
+  margin: 0 0 18px;
+  padding-left: 18px;
+}
+.info ul.info__features li::marker { color: var(--accent); }
+
+.info__species {
+  padding-top: 16px;
+  border-top: 1px dashed #2a3a4a;
+}
+.info__species h3 {
+  margin: 4px 0 2px;
+  font-size: 18px;
+  color: #fff;
+}
+
+.info__hint {
+  margin: 16px 0 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* =========================================================
+   Scene navigation (↑ / ↓ between surface, open water, seabed)
+   Placeholder look — restyle freely.
+   ========================================================= */
+
+.scene-nav {
+  position: fixed;
+  right: 20px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  font-family: Consolas, "SF Mono", Menlo, "Courier New", monospace;
+  font-size: 13px;
+  transition: opacity 0.4s ease;
+}
+.scene-nav.is-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+.scene-nav button {
+  padding: 6px 12px;
+  font: inherit;
+  color: #d8e4ee;
+  background: rgba(4, 10, 20, 0.6);
+  border: 1px solid #2a3a4a;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.scene-nav button:hover:not(:disabled) { border-color: #8fd3ff; color: #fff; }
+.scene-nav button:disabled { opacity: 0.4; cursor: default; }
+.scene-nav__here {
+  padding: 0 12px;
+  color: #8fa3b5;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/* narrow screens: panel along the bottom, jellyfish above it */
+@media (max-width: 760px) {
+  .info {
+    left: 12px;
+    right: 12px;
+    top: auto;
+    bottom: 12px;
+    width: auto;
+    max-height: 52vh;
+    transform: translateY(12px);
+  }
+  .info.show { transform: translateY(0); }
+}
