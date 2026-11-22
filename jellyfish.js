@@ -190,7 +190,7 @@
 
   // ================= drag & jiggle physics =================
 
-  const drag = { j: null, e: null, x: 0, y: 0, offX: 0, offY: 0 }; // e: a held baby jellyfish
+  const drag = { j: null, e: null, p: null, x: 0, y: 0, offX: 0, offY: 0 }; // e: baby jellyfish, p: polyp
 
   // Physics settings.
   const WATER = {
@@ -307,15 +307,19 @@
     damp: 5,      // spring-back damping (lower = wobbles for longer)
   };
 
-  function stauroPull(j, rdt, held) {
+  // Stretching anything anchored — stalked jellyfish and polyps share this.
+  // o: the thing (gets sX/sY stretch and svX/svY spring speed); held: being
+  // pulled right now; height: its body height (rows), which sets how far it
+  // can be pulled before slipping free; letGo: called when it slips free.
+  function stretchPull(j, rdt, held, height, letGo) {
     j.sX = j.sX || 0; j.sY = j.sY || 0; j.svX = j.svX || 0; j.svY = j.svY || 0;
     if (held) {
       const rx = drag.x - drag.startX, ry = drag.y - drag.startY;
       const dist = Math.hypot(rx, ry);
-      const limit = (j.Hs + j.Hc) * STRETCH.snap;
+      const limit = height * STRETCH.snap;
       if (dist > limit) {
         // slipped free — the spring below takes over from here
-        drag.j = null;
+        letGo();
         canvas.style.cursor = 'grab';
       } else {
         const g = STRETCH.give / (1 + (STRETCH.firm * dist) / limit);
@@ -334,6 +338,9 @@
       j.sX = j.sY = j.svX = j.svY = 0;
     }
   }
+
+  // a stalked jellyfish's body height is its stalk + cup
+  const stauroPull = (j, rdt, held) => stretchPull(j, rdt, held, j.Hs + j.Hc, () => { drag.j = null; });
 
   // ================= collisions =================
   // Every creature's main body is a round, soft bumper: the bell for
@@ -547,6 +554,7 @@
     if (focus.mode !== 'none' || scrollBusy()) return; // no dragging while zoomed / scrolling
     const [wx, wy] = toWorldPt(e);
     const hs = hitScenery(wx, wy);      // small things first: a polyp or baby jellyfish
+    if (!hs && hitVent(wx, wy)) { tapVent(); return; } // the vent: build up pressure
     const j = hs ? null : hitTest(wx, wy, true);
     if (!j) {
       if (hs && hs.kind === 'ephyra') {   // a baby jellyfish: grab it
@@ -558,7 +566,13 @@
         canvas.style.cursor = 'grabbing';
         return;
       }
-      if (hs) return;                     // a polyp: no scroll, so it can be double-clicked
+      if (hs) {                           // a polyp: grab it to stretch it (no scroll)
+        drag.p = hs.src;
+        drag.x = drag.startX = wx; drag.y = drag.startY = wy;
+        canvas.setPointerCapture(e.pointerId);
+        canvas.style.cursor = 'grabbing';
+        return;
+      }
       // empty space: swipe to change scene
       pan.active = true;
       pan.x0 = e.clientX; pan.y0 = e.clientY; pan.dx = 0; pan.dy = 0;
@@ -584,7 +598,7 @@
   const grassPtr = { x: 0, t: 0 };
   canvas.addEventListener('pointermove', (e) => {
     const [wx, wy] = toWorldPt(e);
-    if (drag.j || drag.e) { drag.x = wx; drag.y = wy; return; }
+    if (drag.j || drag.e || drag.p) { drag.x = wx; drag.y = wy; return; }
     if (pan.active) {
       pan.dx = e.clientX - pan.x0; pan.dy = e.clientY - pan.y0;
       const tNow = performance.now(), dtm = Math.max(1, tNow - pan.lastT) / 1000;
@@ -594,7 +608,8 @@
     }
     if (focus.mode !== 'none') { canvas.style.cursor = 'zoom-out'; return; }
     const hs = hitScenery(wx, wy);
-    canvas.style.cursor = hs ? (hs.kind === 'ephyra' ? 'grab' : 'zoom-in')
+    canvas.style.cursor = hs ? 'grab'
+                        : hitVent(wx, wy) ? 'pointer'
                         : hitTest(wx, wy, true) ? 'grab' : 'default';
     // moving the cursor through the seagrass pushes the blades aside
     const tNow = performance.now();
@@ -606,6 +621,7 @@
   });
 
   function release() {
+    if (drag.p) { drag.p = null; canvas.style.cursor = 'grab'; return; } // a polyp springs back
     if (drag.e) {                         // let go of a baby jellyfish: fling it
       const e = drag.e;
       e.tvx = clamp(e.hvx || 0, -rows, rows);
@@ -1216,7 +1232,7 @@
     if (focus.mode !== 'none' || scrollBusy()) return; // zooming / zoomed / scrolling
     const [wx, wy] = toWorldPt(e);
     const hs = hitScenery(wx, wy);                       // small things first: polyp / baby jellyfish
-    if (hs) { drag.e = null; startFocus(sceneryView(hs)); return; }
+    if (hs) { drag.e = null; drag.p = null; startFocus(sceneryView(hs)); return; }
     const j = hitTest(wx, wy, true);
     if (j) {
       release();
@@ -1530,12 +1546,15 @@
     let n = through * SPARK.float * dt;
     while (n > 0) {
       if (Math.random() < n) {
-        if (Math.random() < 0.5) {
-          spark(j.x + rand(-1, 1) * j.R, j.y + j.R * j.fh * rand(0.5, 1.4));
+        const pts = j.tentPts;
+        if (Math.random() < 0.35 || !pts || !pts.length) {
+          // around the underside of the float
+          const [x, y] = toWorld(j, rand(-1, 1) * j.R, j.R * j.fh * rand(0.5, 1.2));
+          spark(x, y);
         } else {
-          const f = j.fishing[Math.floor(Math.random() * j.fishing.length)];
-          const along = rand(0, f.len * (j.zs || 1) * 0.8);
-          spark(j.x + f.u * j.flip * j.R + rand(-1, 1), j.y + j.R * j.fh + along, 0.8);
+          // somewhere along a tentacle, exactly where it was drawn
+          const i = 2 * Math.floor(Math.random() * (pts.length / 2));
+          spark(pts[i] + rand(-0.5, 0.5), pts[i + 1] + rand(-0.5, 0.5), 0.8);
         }
       }
       n -= 1;
@@ -1670,11 +1689,12 @@
   const POLYP = {
     rocks: 3,              // rocks with polyps on them
     perRock: [1, 1],       // polyps per rock
-    size: [0.025, 0.035],  // drawing scale (× screen height): bigger = easier to see
+    height: [0.2, 0.24],   // full height incl. tentacle crown (× screen height) — a stalked jellyfish's
     period: [35, 60],      // seconds for a full cycle
     chance: 0.5,           // fraction of cycles in which a polyp strobilates
+    regrow: 0.12,          // fraction of the next cycle spent regrowing its tentacles
     discs: [3, 6],         // discs (future ephyrae) per stack
-    hue: 28,               // pale orange-cream
+    hue: 52,               // pale yellow (stands apart from the vent's orange)
   };
   const EPHYRA = {
     rise: 10,         // swim speed per pulse
@@ -1695,15 +1715,52 @@
     // a few bigger rocks, spread out, for the polyps
     scenery.polyps = [];
     scenery.ephyrae = [];
+    // Spread the stalked jellyfish and the polyp rocks evenly along the
+    // seabed, alternating, so none of them overlap (a little jitter keeps it
+    // from looking like a grid). Stalked jellyfish are moved to their slots.
+    const stalked = (sceneLists.seabed || []).filter((j) => j.kind === 'stauro');
+    // the order along the seabed: stalked / rock alternating, with the vent
+    // slipped in somewhere
+    const kinds = [];
+    const order = Math.random() < 0.5;                   // which kind takes the first slot
+    let ns = stalked.length, nr = POLYP.rocks;
+    while (ns || nr) {
+      const stalkedTurn = (kinds.length % 2 === 0) === order;
+      if ((stalkedTurn && ns) || !nr) { kinds.push('s'); ns--; } else { kinds.push('r'); nr--; }
+    }
+    kinds.splice(Math.floor(Math.random() * (kinds.length + 1)), 0, 'v');
+    // each thing gets a slot as wide as it needs (how far it reaches either
+    // side); the leftover width is shared out evenly as gaps between them
+    const polypHs = Array.from({ length: POLYP.rocks }, () => rand(2.5, 4));      // body length in its own units
+    const polypScales = polypHs.map((h) => (rows * rand(POLYP.height[0], POLYP.height[1])) / (h + 1.4)); // body + crown
+    const rockWs = Array.from({ length: POLYP.rocks }, () => rand(9, 12));
+    let si = 0, ri = 0;
+    const half = kinds.map((kd) => {
+      if (kd === 's') return stalked[si++].R * 1.6;
+      if (kd === 'r') { const i = ri++; return Math.max(rockWs[i], polypScales[i] * 1.7); }
+      return VENT.width + 2;
+    });
+    const used = half.reduce((a, b) => a + 2 * b, 0);
+    const space = Math.max(0, W - used) / (kinds.length + 1);
+    let cursor = space;
+    si = 0;
+    const rockSlots = [];
+    kinds.forEach((kd, k) => {
+      const x = cursor + half[k] + rand(-0.3, 0.3) * space;   // a little jitter within the gap
+      cursor += 2 * half[k] + space;
+      if (kd === 's') { const j = stalked[si++]; j.x = x; j.y = seabedY(x); }
+      else if (kd === 'r') rockSlots.push(x);
+      else makeVent(x);
+    });
     for (let i = 0; i < POLYP.rocks; i++) {
-      const rock = { x: W * (i + 0.5) / POLYP.rocks + rand(-W * 0.08, W * 0.08),
-                     w: rand(8, 12), h: rand(4, 6), seed: Math.random() * 10 };
+      const rock = { x: rockSlots[i], w: rockWs[i], h: rand(4.5, 6.5), seed: Math.random() * 10,
+                     scale: polypScales[i], polypH: polypHs[i] };
       scenery.rocks.push(rock);
       const n = POLYP.perRock[0] + Math.floor(Math.random() * (POLYP.perRock[1] - POLYP.perRock[0] + 1));
       for (let p = 0; p < n; p++) {
         scenery.polyps.push({
-          rock, f: n === 1 ? rand(-0.25, 0.25) : rand(-0.65, 0.65), h: rand(2.5, 4),
-          scale: rows * rand(POLYP.size[0], POLYP.size[1]),
+          rock, f: n === 1 ? rand(-0.25, 0.25) : rand(-0.65, 0.65), h: rock.polypH,
+          scale: rock.scale,
           P: rand(POLYP.period[0], POLYP.period[1]), off: rand(0, 60), ph: rand(0, 6.28),
           n: POLYP.discs[0] + Math.floor(Math.random() * (POLYP.discs[1] - POLYP.discs[0] + 1)),
           cycle: -1, released: 0,
@@ -1720,7 +1777,10 @@
       const cx = rand(0, W);
       const n = GRASS.perClump[0] + Math.floor(Math.random() * (GRASS.perClump[1] - GRASS.perClump[0] + 1));
       for (let b = 0; b < n; b++) {
-        scenery.weeds.push(newBlade(cx + rand(-2.5, 2.5), rows * rand(GRASS.height[0], GRASS.height[1])));
+        const x = cx + rand(-2.5, 2.5);
+        // keep the vent clear of grass
+        if (scenery.vent && Math.abs(x - scenery.vent.x) < VENT.width + 3) continue;
+        scenery.weeds.push(newBlade(x, rows * rand(GRASS.height[0], GRASS.height[1])));
       }
     }
     grassAroundStalked();
@@ -1737,6 +1797,255 @@
     }
   }
 
+  // ---------- seabed: a hydrothermal vent ----------
+  // A rough rocky chimney with a hot glowing mouth, puffing a plume of dark
+  // smoke. Click it and it shudders, cracks glow up its sides and it belches
+  // smoke; pressure builds with each click and drains away slowly. Enough
+  // clicks in a row and it blows: a flash, a shockwave, chunks of chimney
+  // flying out and sinking to the sand, a burst of smoke, and everything
+  // nearby knocked back. Then it slowly rebuilds.
+  const VENT = {
+    taps: 7,           // clicks (in quick-ish succession) to make it blow
+    drain: 0.12,       // pressure lost per second (as a fraction of the total)...
+    hold: 0.6,         // ...once you've stopped clicking for this long (seconds)
+    height: 0.32,      // chimney height (× screen height)
+    width: 5,          // chimney half-width at the base (rows)
+    smoke: 18,         // smoke puffs per second normally
+    cooldown: 5,       // seconds after an eruption before clicks build pressure again
+    bubbles: 2,        // bubbles per second normally (many more while erupting)
+    erupt: 2,          // seconds the lava fountain keeps going
+    rise: 0.6,         // seconds for it to surge up out of the mouth to full height
+    fall: 0.6,         // seconds for it to die back down at the end
+    jet: 45,           // how high/fast the lava shoots (rows/s upward)
+    stream: 10,        // lava blobs per frame at full strength (denser = a more solid jet)
+    blast: 1,          // overall strength of the lava fountain
+  };
+  const HOT_PAL = () => hueIdx(18);  // glowing orange-red
+  const SMOKE_PAL = () => ROCK_PAL;  // dark grey
+
+  function makeVent(x) {
+    scenery.vent = { x, h: rows * VENT.height, grow: 1, pressure: 0, shake: 0, cool: 0,
+                     seed: Math.random() * 10, smoke: [], debris: [], lava: [], bubbles: [], blastAge: -1 };
+  }
+
+  // half-width of the chimney at height fraction k (rough and knobbly)
+  const ventWidth = (v, k) => VENT.width * (1 - 0.55 * k) * (0.85 + 0.25 * hash(Math.round(k * 20), v.seed));
+
+  function hitVent(wx, wy) {
+    const v = scenery.vent;
+    if (!v || scene !== 'seabed') return false;
+    const base = seabedY(v.x), H = v.h * v.grow;
+    if (wy > base + 1 || wy < base - H - 2) return false;
+    const k = clamp((base - wy) / H, 0, 1);
+    return Math.abs(wx - v.x) < ventWidth(v, k) + 1.5;
+  }
+
+  function tapVent() {
+    const v = scenery.vent;
+    if (v.cool > 0) { v.shake = Math.min(1.5, v.shake + 0.2); return; } // still recovering: just a dull thud
+    v.pressure += 1 / VENT.taps;
+    v.lastTap = simTime;
+    v.shake = Math.min(1.5, v.shake + 0.7);
+    puffSmoke(v, 12 + 30 * v.pressure, 1 + v.pressure);
+    if (v.pressure >= 1 - 1e-6) blowVent(v);
+  }
+
+  function puffSmoke(v, n, power = 1) {
+    const top = seabedY(v.x) - v.h * v.grow;
+    for (let i = 0; i < n && v.smoke.length < 900; i++) {
+      v.smoke.push({ x: v.x + rand(-1, 1), y: top, vx: rand(-1.5, 1.5) * power, vy: -rand(4, 9) * power,
+                     age: 0, life: rand(3, 6), b: rand(0.5, 1) });
+    }
+  }
+
+  // It erupts: the chimney stays standing and a fountain of lava surges up
+  // out of its mouth for a couple of seconds, with a tall column of smoke and
+  // a rush of bubbles — like a volcano. Then it needs a while to recover.
+  function blowVent(v) {
+    v.pressure = 0; v.shake = 0.8; v.blastAge = 0;
+    v.erupting = VENT.erupt;
+    v.cool = VENT.erupt + VENT.cooldown;
+    puffSmoke(v, 25, 1.5);
+  }
+
+  // How strong the eruption is right now, 0..1: it builds up out of the
+  // mouth over VENT.rise seconds (fast, easing out), holds, then dies back
+  // over the last VENT.fall seconds.
+  function eruptPower(v) {
+    if (!(v.erupting > 0)) return 0;
+    const into = VENT.erupt - v.erupting;
+    const up = Math.min(1, into / VENT.rise), down = Math.min(1, v.erupting / VENT.fall);
+    return (1 - Math.pow(1 - up, 2)) * down * down * (3 - 2 * down);
+  }
+
+  // while erupting: lava shoots up and smoke surges up (purely visual —
+  // nothing gets pushed around)
+  function stepEruption(v, rdt) {
+    if (!(v.erupting > 0)) return;
+    v.erupting -= rdt;
+    const base = seabedY(v.x), top = base - v.h, power = eruptPower(v);
+    for (let i = 0; i < Math.round(3 * power); i++) bubble(v, top, 1.6);
+    for (let i = 0; i < Math.round(VENT.stream * power); i++) {
+      // the lava is the jet: most blobs shoot nearly straight up the middle,
+      // a few fan out wider; slow at first, full height once it's going
+      const spread = Math.pow(rand(-1, 1), 3);           // mostly near 0 → a tight core
+      v.lava.push({ x: v.x + spread * 1.5, y: top - 0.5, vx: spread * 7 * (0.4 + 0.6 * power),
+                    vy: -rand(0.75, 1) * VENT.jet * VENT.blast * (0.25 + 0.75 * power),
+                    age: 0, settled: 0, b: rand(0.75, 1), core: 1 - Math.abs(spread) });
+    }
+    if (v.smoke.length < 900) puffSmoke(v, Math.round(6 * power), 1 + 4 * power);
+  }
+
+  // bubbles from the vent's mouth: rise, wobbling, and pop at the top
+  function bubble(v, top, power) {
+    if (v.bubbles.length > 300) return;
+    v.bubbles.push({ x: v.x + rand(-1.5, 1.5), y: top - 0.5, r: rand(0.3, 1.3) * (power > 1 ? 1.2 : 1),
+                     vy: -rand(6, 12) * power, ph: rand(0, 6.28), age: 0 });
+  }
+
+  function drawBubbles(v, rdt) {
+    const keep = [];
+    for (const b of v.bubbles) {
+      b.age += rdt;
+      b.vy += (-8 - b.vy) * Math.min(1, rdt * 1.5);      // settles to a steady rise
+      b.y += b.vy * rdt;
+      b.x += Math.sin(b.age * 5 + b.ph) * 1.2 * rdt;    // wobbles as it rises
+      if (b.y < -4 || b.age > 15) continue;               // popped / gone
+      keep.push(b);
+      const pal = RAIN_PAL;                               // cool blue-white
+      if (b.r < 0.8) { plot(b.x, b.y, 0.45, pal); continue; }
+      // a little ring, brighter at the top-left where it catches the light
+      const n = Math.ceil((Math.PI * 2 * b.r) / 0.45);
+      for (let i = 0; i < n; i++) {
+        const th = (i / n) * Math.PI * 2;
+        const shine = Math.cos(th + 2.3) > 0.6 ? 0.65 : 0.35;
+        plot(b.x + Math.cos(th) * b.r, b.y + Math.sin(th) * b.r, shine, pal);
+      }
+    }
+    v.bubbles = keep;
+  }
+
+  // lava: shoots up, arcs over and rains back down, cooling from bright
+  // orange to dull red to dark rock; lands on the sand and fades
+  function drawLava(v, rdt) {
+    if (!v.lava) return;
+    const keep = [];
+    for (const p of v.lava) {
+      p.age += rdt;
+      if (p.settled > 3) continue;
+      keep.push(p);
+      const floor = seabedY(p.x) - 0.4;
+      if (p.y < floor || p.vy < 0) {
+        p.vy += 26 * rdt;                                // gravity (slowed by the water)
+        const k = Math.exp(-rdt * 0.5);
+        p.vx *= k; p.vy *= k;
+        p.x += p.vx * rdt; p.y = Math.min(floor, p.y + p.vy * rdt);
+      } else p.settled += rdt;
+      const heat = Math.max(0, 1 - p.age / 2.2);         // 1 = fresh, 0 = cooled
+      const core = p.core === undefined ? 0.5 : p.core;  // blobs in the middle of the jet glow hottest
+      const I = Math.min(1, (0.3 + 0.55 * heat + 0.25 * core * heat) * p.b) * Math.min(1, (3 - p.settled) / 1.5);
+      const pal = heat > 0.15 ? hueIdx(8 + 22 * heat + 10 * core * heat) : ROCK_PAL;
+      plot(p.x, p.y, I, pal);
+      // a glowing streak behind it, longer the faster it's moving
+      const sp = Math.hypot(p.vx, p.vy);
+      if (heat > 0.2 && sp > 3) {
+        const L = Math.min(4, sp * 0.09), ux = -p.vx / sp, uy = -p.vy / sp;
+        for (let d = 0.5; d < L; d += 0.5) plot(p.x + ux * d, p.y + uy * d, I * (1 - d / L) * 0.8, pal);
+      }
+    }
+    v.lava = keep;
+  }
+
+  function drawVent(t, dt) {
+    const v = scenery.vent;
+    if (!v) return;
+    const rdt = dt / TIME_SCALE;
+    if (simTime - (v.lastTap || -99) > VENT.hold) v.pressure = Math.max(0, v.pressure - VENT.drain * rdt);
+    v.shake *= Math.exp(-rdt * 4);
+    stepEruption(v, rdt);
+    v.cool = Math.max(0, v.cool - rdt);
+    if (Math.random() < VENT.bubbles * rdt) bubble(v, seabedY(v.x) - v.h, 1);
+    const base = seabedY(v.x), H = v.h * v.grow;
+    const jitter = Math.sin(t * 55) * v.shake * 0.6;
+    const hot = HOT_PAL();
+
+    // the chimney: rough rock, with cracks glowing hotter as pressure builds
+    if (H > 1) {
+      for (let y = 0; y < H; y += 1) {
+        const k = y / H, hw = ventWidth(v, k);
+        for (let dx = -hw; dx <= hw; dx += aspect) {
+          const edge = Math.abs(dx) > hw - aspect * 1.2;
+          const n = hash(Math.round((dx + 20) * 3) + v.seed, Math.round(y));
+          // the heat is in the top, where it erupts from: glowing cracks
+          // spread down from the mouth as pressure builds — none near the base
+          const heat = v.pressure * Math.pow(k, 2.2);
+          const crack = heat > 0.02 && n > 1 - heat * 0.6;
+          // and the rock just under the mouth warms up
+          const warm = v.pressure * clamp((k - 0.75) / 0.25, 0, 1);
+          if (crack) plot(v.x + dx + jitter, base - y, 0.4 + 0.55 * heat, hot);
+          else if (warm > 0.15 && n > 0.4) plot(v.x + dx + jitter, base - y, 0.25 + 0.35 * warm, hot);
+          else plot(v.x + dx + jitter, base - y, (edge ? 0.42 : 0.22) * (0.8 + 0.2 * n), ROCK_PAL);
+        }
+      }
+      // the glowing mouth
+      const mouth = (0.55 + 0.25 * Math.sin(t * 6) + 0.3 * v.pressure) * (v.cool > 0 && !(v.erupting > 0) ? 0.55 : 1);
+      blob(v.x + jitter, base - H, 1.1, Math.min(1, mouth), hot);
+    }
+
+    // smoke: rising, slowing, spreading, warm near the mouth, then dark
+    if (v.grow > 0.3 && Math.random() < VENT.smoke * v.grow * dt) puffSmoke(v, 1 + Math.round(v.pressure * 3));
+    const keep = [];
+    for (const p of v.smoke) {
+      p.age += dt;
+      if (p.age > p.life) continue;
+      keep.push(p);
+      const drag = Math.exp(-dt * 0.9);
+      p.vx = p.vx * drag + Math.sin(p.age * 1.3 + p.b * 9) * 0.6 * dt;
+      p.vy = p.vy * drag;
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      const k = p.age / p.life;
+      const I = p.b * (k < 0.08 ? 0.5 : 0.28) * (1 - k);
+      plot(p.x, p.y, I, k < 0.08 ? hot : SMOKE_PAL());
+      if (k > 0.3) plot(p.x + aspect, p.y, I * 0.6, SMOKE_PAL()); // billows wider as it rises
+    }
+    v.smoke = keep;
+
+    // the eruption: a flash at the mouth and a glowing column rising out of
+    // it while the lava fountain runs, then the lava itself
+    if (v.blastAge >= 0) {
+      v.blastAge += rdt;
+      if (!(v.erupting > 0)) v.blastAge = -1;
+    }
+    if (v.erupting > 0) {
+      // the mouth glows white-hot while the lava pours out of it
+      const power = eruptPower(v);
+      for (let dx = -2; dx <= 2; dx += aspect) {
+        plot(v.x + dx, base - H, (0.6 + 0.4 * power) * (1 - 0.4 * Math.abs(dx) / 2), hueIdx(38));
+      }
+    }
+    drawLava(v, rdt);
+    drawBubbles(v, rdt);
+
+    // debris: flies out, sinks, lands on the sand and slowly fades
+    const keepD = [];
+    for (const d of v.debris) {
+      d.age += rdt;
+      if (d.settled > 6) continue;
+      keepD.push(d);
+      const floor = seabedY(d.x) - 0.5;
+      if (d.y < floor) {
+        d.vy += 18 * rdt;                                 // sinks (water slows the fall)
+        const k = Math.exp(-rdt * 1.2);
+        d.vx *= k; d.vy *= k;
+        d.x += d.vx * rdt; d.y = Math.min(floor, d.y + d.vy * rdt);
+      } else d.settled += rdt;
+      const glow = Math.max(0, 1 - d.age * 1.5);          // still hot for a moment
+      const I = 0.45 * Math.min(1, (6 - d.settled) / 2);
+      blob(d.x, d.y, d.r, I, glow > 0.2 ? hot : ROCK_PAL);
+    }
+    v.debris = keepD;
+  }
+
   // where a polyp sits on its rock, and which way it leans
   function polypGeom(p, t) {
     const k = p.rock, base = seabedY(k.x) + 0.5;
@@ -1751,9 +2060,15 @@
     const cyc = Math.floor((t + p.off) / p.P), q = ((t + p.off) % p.P) / p.P;
     if (g && cyc !== p.cycle) { p.cycle = cyc; p.released = 0; }
     let len = p.h, discs = 0, tent = 1;
-    const strobilates = hash(cyc, p.ph * 100) < POLYP.chance; // not every cycle
-    if (!strobilates) { /* this cycle it just sits with its tentacles out */ }
-    else if (q < 0.08) tent = q / 0.08;                  // tentacles regrowing
+    const strob = (c) => hash(c, p.ph * 100) < POLYP.chance; // not every cycle strobilates
+    const strobilates = strob(cyc);
+    // regrowing: if the last cycle ended with it releasing its discs (all its
+    // tentacles gone), they grow back gradually at the start of this one
+    if (q < POLYP.regrow && strob(cyc - 1)) {
+      const e = q / POLYP.regrow;
+      tent = e * e * (3 - 2 * e);                        // eases in and out
+    }
+    if (!strobilates) { /* this cycle it just sits feeding */ }
     else if (q >= 0.5 && q < 0.72) {                     // strobilating: stretch + segment
       const e = (q - 0.5) / 0.22;
       len = p.h * (1 + 0.6 * e); discs = Math.ceil(p.n * e); tent = 1 - e;
@@ -1773,7 +2088,9 @@
 
   // draw a polyp from its base (bx, by), leaning by tilt, scaled by zs
   // (zs > 1 when zoomed in on it)
-  function drawPolypAt(p, st, t, bx, by, tilt, zs = 1) {
+  function drawPolypAt(p, st, t, bx, by, tilt, zs = 1, sx = 0, sy = 0) {
+    // (sx, sy): how far it's being stretched by a pull — the base stays put
+    // and each part moves further the higher up it is
     const ux = Math.sin(tilt), uy = -Math.cos(tilt);     // "up" along the polyp
     const nx = -uy, ny = ux;                             // across it
     const len = st.len * zs, discs = st.discs, tent = st.tent;
@@ -1782,34 +2099,38 @@
     for (let sAlong = 0; sAlong <= len; sAlong += 0.35) {
       const kk = sAlong / len;
       let hw = 0.3 + 0.55 * Math.pow(kk, 1.4);           // slim stalk widening to the top
-      let I = 0.32 + 0.12 * kk;
+      let I = 0.5 + 0.15 * kk;
       if (discs > 0 && sAlong > segStart) {              // segmented: rims with pinches between
         const seg = (sAlong - segStart) / ((len - segStart) / discs);
         const rim = Math.pow(Math.abs(Math.sin(Math.PI * seg)), 0.6);
-        hw = 0.55 + 0.7 * rim; I = 0.3 + 0.3 * rim;
+        hw = 0.55 + 0.7 * rim; I = 0.45 + 0.35 * rim;
       }
       hw *= zs;
-      const cx = bx + ux * sAlong, cy = by + uy * sAlong;
+      const q = Math.pow(kk, 1.6);
+      const cx = bx + ux * sAlong + sx * q, cy = by + uy * sAlong + sy * q;
       plot(cx + nx * hw, cy + ny * hw, I, pal);
       plot(cx - nx * hw, cy - ny * hw, I, pal);
-      if (zs > 1.5) for (let w = -hw + 0.5; w < hw; w += 0.6) plot(cx + nx * w, cy + ny * w, I * 0.35, pal);
-      else plot(cx, cy, I * 0.5, pal);
+      for (let w = -hw + 0.5; w < hw; w += 0.5) plot(cx + nx * w, cy + ny * w, I * 0.4, pal); // filled body
     }
     // crown of tentacles (shrinks away while strobilating)
     if (tent > 0.05) {
-      const tx = bx + ux * len, ty = by + uy * len;
-      const count = zs > 1.5 ? 12 : 6;
+      const tx = bx + ux * len + sx, ty = by + uy * len + sy;
+      const count = zs > 1.5 ? 12 : 9;
       for (let i = 0; i < count; i++) {
         const a = tilt + (i / (count - 1) - 0.5) * 2.2 + 0.15 * Math.sin(t * 1.5 + i + p.ph);
         const L = (1.2 + 0.5 * Math.sin(i * 1.7)) * tent * zs;
-        for (let d = 0.3; d < L; d += 0.3) plot(tx + Math.sin(a) * d, ty - Math.cos(a) * d, 0.35 * tent, pal);
+        for (let d = 0.3; d < L; d += 0.3) plot(tx + Math.sin(a) * d, ty - Math.cos(a) * d, 0.5 * tent, pal);
       }
     }
   }
 
-  function drawPolyp(p, t) {
+  function drawPolyp(p, t, dt) {
+    stretchPull(p, dt / TIME_SCALE, drag.p === p, p.h * (p.scale || 1), () => { drag.p = null; });
     const g = polypGeom(p, t);
-    drawPolypAt(p, polypState(p, t, g), t, g.bx, g.by, g.tilt, p.scale || 1);
+    const st = polypState(p, t, g);                      // (keeps its cycle going regardless)
+    // while you're zoomed in on it, the stand-in is it — don't also draw it here
+    if (focus.j && focus.j.proxy && focus.j.src === p) return;
+    drawPolypAt(p, st, t, g.bx, g.by, g.tilt, p.scale || 1, p.sX, p.sY);
   }
 
   // babies are sized to match the polyp they came from
@@ -1964,8 +2285,9 @@
     }
 
     // polyps on the rocks, and the baby jellyfish they release
-    for (const p of scenery.polyps || []) drawPolyp(p, t);
+    for (const p of scenery.polyps || []) drawPolyp(p, t, dt);
     drawEphyrae(dt, t);
+    drawVent(t, dt);
   }
 
   function drawSceneryFor(name, t, dt) {
@@ -2270,7 +2592,7 @@
 
   const Stauro = {
     make() {
-      const R = Math.max(4, rows * rand(0.07, 0.1));
+      const R = Math.max(4, rows * rand(0.068, 0.082)); // ~same height as the polyps
       // spread along the seabed, away from other stalked jellies
       const W = worldW();
       let x = rand(R * 2, W - R * 2), best = -1;
@@ -2599,14 +2921,20 @@
 
       // long fishing tentacles, beaded with stinging-cell clusters,
       // trailing behind the drift and slowly contracting
+      // remember a few points along the tentacles as drawn this frame, so
+      // plankton sparkles can be set off where they actually are
+      const pts = (j.tentPts = j.tentPts || []);
+      pts.length = 0;
       for (const f of j.fishing) {
         const bu = f.u * flip * Fl, bv = hh(f.u) * Fl;
         const len = f.len * zs * (0.75 + 0.25 * Math.sin(t * 0.25 + f.ph));
+        let n = 0;
         for (let s = 0; s < len; s += 0.4) {
           const k = s / len, sz = s / zs;
           const sway = Math.sin(sz * 0.06 - t * 0.9 + f.ph) * (0.05 + 0.95 * k) * rows * 0.04 * zs;
           const lag = -j.dir * k * len * 0.15;
           const [x, y] = toWorld(j, bu + sway + lag, bv + s, k);
+          if (n++ % 4 === 0) pts.push(x, y);
           const bead = 0.65 + 0.6 * Math.pow(Math.max(0, Math.sin(sz * 1.4 + f.ph)), 10);
           plot(x, y, Math.min(1, (0.45 - 0.3 * k) * bead), j.shade(f.hue - 0.3 * k));
         }
@@ -2762,9 +3090,13 @@
         if (plotGain > 0.01) drawCounted(sp, j, jt);
       }
     }
-    if (focus.j && focus.j.proxy) {
+    // the zoomed-in one, if it isn't in this scene's list (a polyp / baby
+    // jellyfish stand-in, or whatever it was swapped into — that only joins a
+    // scene when you zoom out)
+    if (focus.j && !creatures.includes(focus.j)) {
       plotGain = focusGain;
-      drawCounted(SPECIES[focus.j.kind], focus.j, t);
+      if (!focus.j.proxy) jiggle(focus.j, rdt);
+      drawCounted(SPECIES[focus.j.kind], focus.j, t - (focus.j.tOff || 0));
     }
     plotGain = 1;
 
