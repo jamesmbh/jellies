@@ -25,7 +25,13 @@
     [220, 15], // star: soft white
     [210, 45], // star: cool blue-white
     [45, 45],  // star: warm yellow-white
+    [215, 22], // seabed sand: muted blue-grey (moonlit)
+    [225, 12], // seabed rock: dark grey
+    [205, 18], // marine snow: pale blue-grey
   ];
+  const SAND_PAL = HUES + 3;
+  const SNOW_PAL = HUES + 5;
+  const ROCK_PAL = HUES + 4;
   // white & blue-white listed twice so they're more common than warm stars
   const STAR_PALS = [HUES, HUES + 1, HUES, HUES + 1, HUES + 2];
   const hueIdx = (h) => ((Math.round(h / HUE_STEP) % HUES) + HUES) % HUES;
@@ -37,7 +43,7 @@
   // They're stacked top to bottom in SCENE_ORDER; the ↑/↓ buttons (or arrow
   // keys) move between neighbours.
   const SCENES = {
-    surface:   { siphono: 1 },                      // Portuguese man o' war
+    surface:   { siphono: 3 },                      // Portuguese man o' war
     openWater: { scypho: 3, cubo: 2, hydro: 4 },    // the free swimmers
     seabed:    { stauro: 3 },                       // stalked jellyfish
   };
@@ -120,11 +126,30 @@
   // other creatures out while one is zoomed in on)
   let plotGain = 1;
 
+  // vertical view offset in rows (the whole picture follows a swipe on empty
+  // space, then springs back) — see "swiping between scenes"
+  let camY = 0;
+
   // light one cell (world coords); the brightest thing in a cell wins
+  // While a creature is being drawn (countLit), plot counts the visible
+  // characters it lights: litOwn = on its own scene's screen, litView = on
+  // the screen you're actually looking at (they differ while scrolling).
+  // A creature is only removed once both are zero — nothing of it showing.
+  const LIT_MIN = 0.04;   // dimmest brightness that still draws a character
+  let countLit = false, litOwn = 0, litView = 0;
+  let countOnly = false;  // count what would be lit, but don't draw it
+
   function plot(wx, wy, I, p) {
     const c = Math.round(wx / aspect);
-    const r = Math.round(wy);
-    if (c < 0 || r < 0 || c >= cols || r >= rows) return;
+    if (!(c >= 0 && c < cols)) return;                  // (also rejects NaN)
+    if (countLit && I > LIT_MIN) {
+      const ro = Math.round(wy);
+      if (ro >= 0 && ro < rows) litOwn++;
+    }
+    const r = Math.round(wy + camY);
+    if (!(r >= 0 && r < rows)) return;
+    if (countLit && I > LIT_MIN) litView++;
+    if (countOnly) return;
     const k = r * cols + c;
     I *= plotGain;
     if (I > field[k]) {
@@ -165,7 +190,7 @@
 
   // ================= drag & jiggle physics =================
 
-  const drag = { j: null, x: 0, y: 0, offX: 0, offY: 0 };
+  const drag = { j: null, e: null, x: 0, y: 0, offX: 0, offY: 0 }; // e: a held baby jellyfish
 
   // Physics settings.
   const WATER = {
@@ -190,9 +215,11 @@
   //
   // Separately, sudden changes of speed squash and stretch the bell (j.wob).
   function jiggle(j, rdt) {
-    if (j.ex === undefined) {
-      Object.assign(j, { ex: 0, ey: 0, Ex: 0, Ey: 0, vx: 0, vy: 0, pvx: 0, pvy: 0,
-                         wob: 0, wv: 0, tvx: 0, tvy: 0,
+    // first time: set up the physics state. (Checked by the chain, not by
+    // ex, because a bump or a drag can set ex before this ever runs.)
+    if (!j.chainX) {
+      Object.assign(j, { ex: j.ex || 0, ey: j.ey || 0, Ex: 0, Ey: 0, vx: 0, vy: 0, pvx: 0, pvy: 0,
+                         wob: j.wob || 0, wv: j.wv || 0, tvx: j.tvx || 0, tvy: j.tvy || 0,
                          chainX: new Float32Array(CHAIN_N + 1), chainY: new Float32Array(CHAIN_N + 1),
                          lagX: new Float32Array(LAG_N + 1), lagY: new Float32Array(LAG_N + 1),
                          chainA: new Float32Array(CHAIN_N + 1).fill(j.angle),
@@ -232,6 +259,9 @@
       j.lagA[i] = ca[n] + (ca[n + 1] - ca[n]) * w;
     }
 
+    // a man o' war moving through the water sets off plankton flashes
+    if (j.kind === 'siphono' && !j.wasInAir) floatSparks(j, rdt);
+
     // bell squash & stretch, kicked by changes in velocity
     const dv = Math.hypot(j.vx - j.pvx, j.vy - j.pvy);
     j.pvx = j.vx; j.pvy = j.vy;
@@ -255,6 +285,7 @@
   // after release: keep the throw's momentum, but water drag slows it fast
   function coast(j, rdt) {
     if (!j.tvx && !j.tvy) return;
+    j.tvx = j.tvx || 0; j.tvy = j.tvy || 0;
     j.x += j.tvx * rdt;
     j.y += j.tvy * rdt;
     j.ex = (j.ex || 0) + j.tvx * rdt;
@@ -270,6 +301,7 @@
   // go early springs it back too.
   const STRETCH = {
     give: 0.75,   // how much it stretches compared to how far you pull
+    firm: 0.6,    // how much it resists more the further you pull (0 = never)
     snap: 2,      // pull distance (× its height) at which it slips free
     stiff: 90,    // spring-back stiffness (higher = faster wobble)
     damp: 5,      // spring-back damping (lower = wobbles for longer)
@@ -286,7 +318,7 @@
         drag.j = null;
         canvas.style.cursor = 'grab';
       } else {
-        const g = STRETCH.give / (1 + (0.5 * dist) / limit);
+        const g = STRETCH.give / (1 + (STRETCH.firm * dist) / limit);
         const f = Math.min(1, rdt * 15);
         const nx = j.sX + (rx * g - j.sX) * f, ny = j.sY + (ry * g - j.sY) * f;
         j.svX = (nx - j.sX) / rdt; j.svY = (ny - j.sY) / rdt;
@@ -301,6 +333,181 @@
     if (Math.abs(j.sX) + Math.abs(j.sY) + Math.abs(j.svX) + Math.abs(j.svY) < 0.01) {
       j.sX = j.sY = j.svX = j.svY = 0;
     }
+  }
+
+  // ================= collisions =================
+  // Every creature's main body is a round, soft bumper: the bell for
+  // swimmers, the float for a man o' war, the cup for a stalked jellyfish
+  // (tentacles pass through each other). Overlapping bumpers are eased apart
+  // and given a bounce that water drag then slows (via the same tvx/tvy a
+  // throw uses). The push also counts as "external" movement, so tentacles
+  // swing and bells squash from the knock. Bigger creatures push harder.
+  // A held creature is immovable (shove others with it); a stalked one
+  // can't move, so it sways with its springy stretch instead.
+  const BOUNCE = {
+    push: 30,     // how quickly overlaps are eased apart (per second)
+    kick: 5,      // bounce speed per row of overlap
+    squash: 0.6,  // how much a bump squashes the bell
+    sway: 4,      // how hard a bump sways a stalked jellyfish
+  };
+
+  // A creature's bumper follows the real outline of just its bell (or float
+  // / cup) — nothing below the rim, so tentacles never collide.
+  //
+  // Bells are a dome on top with straight sides down to the rim, so their
+  // bottom corners stick out. Each bumper gives:
+  //   x, y   — the creature's anchor point
+  //   cx, cy — the middle of the bell (used to aim the push)
+  //   reach(nx, ny) — how far the outline extends from (x, y) in that
+  //                   direction (its furthest point that way, corners included)
+  function bumper(j) {
+    const R = j.R;
+    const ca = Math.cos(j.angle || 0), sa = Math.sin(j.angle || 0);
+    // dome (half-height b) on top of a box from the centre line down to the
+    // rim (depth `bot`), width ±a; tilted with the bell
+    const bell = (a, b, bot, boxy) => ({
+      x: j.x, y: j.y,
+      // middle of the bell: halfway between dome top and rim, tilted
+      cx: j.x - sa * (bot - b) / 2,
+      cy: j.y + ca * (bot - b) / 2,
+      reach(nx, ny) {
+        const lx = nx * ca + ny * sa, ly = -nx * sa + ny * ca; // into the bell's frame
+        const side = a * Math.abs(lx);
+        const dome = boxy ? side + Math.max(0, -ly) * b             // box-shaped top
+                   : ly <= 0 ? Math.hypot(a * lx, b * ly) : side;     // rounded dome
+        return Math.max(dome, side + Math.max(0, ly) * bot);          // + skirt corners
+      },
+    });
+    const oval = (x, y, a, b) => ({ x, y, cx: x, cy: y, reach: (nx, ny) => Math.hypot(a * nx, b * ny) });
+    switch (j.kind) {
+      case 'scypho': return bell(R * j.wid, R * j.dome * 1.08, R * (0.06 + j.skirt), false);
+      case 'cubo':   return bell(R, R * j.h, R * 0.12, true);
+      case 'hydro':  return bell(R * j.wid, R * j.dome * 1.12, R * 0.11, false);
+      // float plus its crest
+      case 'siphono': return oval(j.x, j.y - R * j.fh * 0.2, R * 0.95, R * j.fh * 1.2);
+      // the cup (not the stalk), moved with its stretch
+      case 'stauro': return oval(j.x + (j.sX || 0) * 0.8, j.y - (j.Hs + j.Hc * 0.6) + (j.sY || 0) * 0.8,
+                                 R * 1.05, j.Hc * 0.6);
+      default: return null;
+    }
+  }
+
+  function collide(rdt, list = creatures) {
+    const n = list.length;
+    const B = list.map(bumper);
+    const ease = 1 - Math.exp(-rdt * BOUNCE.push);
+    for (let a = 0; a < n; a++) {
+      for (let b = a + 1; b < n; b++) {
+        const A = B[a], C = B[b];
+        if (!A || !C) continue;
+        // push direction: from the middle of one bell toward the other's
+        let dx = C.cx - A.cx, dy = C.cy - A.cy;
+        let d = Math.hypot(dx, dy);
+        if (d < 1e-6) { dx = 1; dy = 0; d = 1; }
+        const nx = dx / d, ny = dy / d;          // from a toward b
+        // along that direction: how far apart the anchors are, minus how far
+        // each outline reaches toward the other (corners included)
+        const along = (C.x - A.x) * nx + (C.y - A.y) * ny;
+        const overlap = A.reach(nx, ny) + C.reach(-nx, -ny) - along;
+        if (overlap <= 0) continue;
+
+        const ja = list[a], jb = list[b];
+        // who gives way: anchored or held creatures don't move at all
+        const fixedA = ja.kind === 'stauro' || drag.j === ja;
+        const fixedB = jb.kind === 'stauro' || drag.j === jb;
+        if (fixedA && fixedB) {
+          // two immovable bodies: stalked ones still sway apart
+          swayStauro(ja, -nx, -ny, overlap, rdt);
+          swayStauro(jb, nx, ny, overlap, rdt);
+          continue;
+        }
+        const ma = ja.R * ja.R, mb = jb.R * jb.R;
+        const shareA = fixedA ? 0 : fixedB ? 1 : mb / (ma + mb);
+        const shareB = 1 - shareA;
+
+        bump(ja, -nx, -ny, overlap * shareA, ease);
+        bump(jb, nx, ny, overlap * shareB, ease);
+        swayStauro(ja, -nx, -ny, overlap, rdt);
+        swayStauro(jb, nx, ny, overlap, rdt);
+      }
+    }
+  }
+
+  // push one creature along (nx, ny) by part of `amount` rows, and bounce it
+  function bump(j, nx, ny, amount, ease) {
+    if (amount <= 0 || j.kind === 'stauro' || drag.j === j) return;
+    const mx = nx * amount * ease, my = ny * amount * ease;
+    j.x += mx; j.y += my;
+    j.ex = (j.ex || 0) + mx; j.ey = (j.ey || 0) + my;     // tentacles feel it
+    j.tvx = (j.tvx || 0) + nx * amount * BOUNCE.kick * ease;
+    j.tvy = (j.tvy || 0) + ny * amount * BOUNCE.kick * ease;
+    j.wv = (j.wv || 0) + (amount / j.R) * BOUNCE.squash;  // bell squashes
+  }
+
+  // push a stalked jellyfish's stretch spring: it leans away while touched
+  // and wobbles back once free
+  function swayStauro(j, nx, ny, overlap, rdt) {
+    if (j.kind !== 'stauro' || drag.j === j) return;
+    const f = overlap * BOUNCE.sway * 25 * rdt;
+    j.svX = (j.svX || 0) + nx * f;
+    j.svY = (j.svY || 0) + ny * f * 0.4;
+  }
+
+  // ================= replacing cleared-out creatures =================
+  // If a creature has been pushed, thrown or dragged completely off screen
+  // (any direction) and stays off for a moment, a new one replaces it —
+  // arriving the usual way for its kind. Only counts once it has been on
+  // screen, so newcomers waiting just off-screen aren't swapped out.
+  const CLEAR_AFTER = 1; // seconds fully off screen before it's replaced
+
+  // draw a creature and record how much of it is visible (see plot)
+  // Make sure a newly made creature isn't visible in the current view (the
+  // view may be half-scrolled, showing water just past its scene's edge where
+  // newcomers normally wait). If any of it would show, it starts further
+  // away — deeper below for swimmers, further upwind for a man o' war — so
+  // nothing ever appears out of nowhere. camY must be set for its scene.
+  function spawnHidden(j) {
+    const sp = SPECIES[j.kind];
+    j.wob = j.wob || 0;
+    for (let i = 0; i < 10; i++) {
+      countLit = true; countOnly = true; litOwn = 0; litView = 0;
+      sp.draw(j, simTime - (j.tOff || 0));
+      countLit = false; countOnly = false;
+      if (litView === 0) break;
+      if (j.kind === 'siphono') j.x += (j.dir > 0 ? -1 : 1) * j.R * 2;
+      else if (j.kind === 'stauro') break;               // anchored; never respawns anyway
+      else j.y += rows * 0.5;
+    }
+    j.litOwn = j.litView = 0;
+    return j;
+  }
+
+  function drawCounted(sp, j, jt) {
+    countLit = true; litOwn = 0; litView = 0;
+    sp.draw(j, jt);
+    countLit = false;
+    j.litOwn = litOwn; j.litView = litView;
+  }
+
+  // nothing of it visible — not on its own screen, nor in the current view
+  // (undefined = not drawn yet, which counts as not visible)
+  const invisible = (j) => !j.litOwn && !j.litView;
+
+  // Should this creature be removed and replaced?
+  //  - it swam off the way its kind leaves (update said so), and nothing of
+  //    it is visible any more; or
+  //  - it was cleared off (pushed / thrown / dragged) and nothing of it has
+  //    been visible for CLEAR_AFTER seconds.
+  function shouldReplace(j, left, rdt) {
+    return (left && invisible(j)) || clearedOff(j, rdt);
+  }
+
+  function clearedOff(j, rdt) {
+    if (j.kind === 'stauro') return false; // anchored — can't be cleared
+    if (!invisible(j)) { j.seen = true; j.offFor = 0; return false; }
+    if (!j.seen) return false;             // hasn't arrived yet
+    j.offFor = (j.offFor || 0) + rdt;
+    return j.offFor > CLEAR_AFTER;
   }
 
   // pointer position → world coords (1 unit = 1 row)
@@ -337,10 +544,28 @@
   canvas.style.touchAction = 'none';
 
   canvas.addEventListener('pointerdown', (e) => {
-    if (focus.mode !== 'none' || sceneSwitch) return; // no dragging while zoomed / switching
+    if (focus.mode !== 'none' || scrollBusy()) return; // no dragging while zoomed / scrolling
     const [wx, wy] = toWorldPt(e);
-    const j = hitTest(wx, wy, true);
-    if (!j) return;
+    const hs = hitScenery(wx, wy);      // small things first: a polyp or baby jellyfish
+    const j = hs ? null : hitTest(wx, wy, true);
+    if (!j) {
+      if (hs && hs.kind === 'ephyra') {   // a baby jellyfish: grab it
+        drag.e = hs.src;
+        drag.x = wx; drag.y = wy;
+        drag.offX = hs.src.x - wx; drag.offY = hs.src.y - wy;
+        hs.src.tvx = 0; hs.src.tvy = 0;
+        canvas.setPointerCapture(e.pointerId);
+        canvas.style.cursor = 'grabbing';
+        return;
+      }
+      if (hs) return;                     // a polyp: no scroll, so it can be double-clicked
+      // empty space: swipe to change scene
+      pan.active = true;
+      pan.x0 = e.clientX; pan.y0 = e.clientY; pan.dx = 0; pan.dy = 0;
+      pan.vy = 0; pan.lastY = e.clientY; pan.lastT = performance.now();
+      canvas.setPointerCapture(e.pointerId);
+      return;
+    }
     if (j.kind === 'stauro') {        // anchored: pull to stretch it
       drag.j = j;
       drag.x = drag.startX = wx; drag.y = drag.startY = wy;
@@ -356,14 +581,39 @@
     canvas.style.cursor = 'grabbing';
   });
 
+  const grassPtr = { x: 0, t: 0 };
   canvas.addEventListener('pointermove', (e) => {
     const [wx, wy] = toWorldPt(e);
-    if (drag.j) { drag.x = wx; drag.y = wy; return; }
+    if (drag.j || drag.e) { drag.x = wx; drag.y = wy; return; }
+    if (pan.active) {
+      pan.dx = e.clientX - pan.x0; pan.dy = e.clientY - pan.y0;
+      const tNow = performance.now(), dtm = Math.max(1, tNow - pan.lastT) / 1000;
+      pan.vy += ((e.clientY - pan.lastY) / dtm - pan.vy) * 0.5; // smoothed speed, px/s
+      pan.lastY = e.clientY; pan.lastT = tNow;
+      return;
+    }
     if (focus.mode !== 'none') { canvas.style.cursor = 'zoom-out'; return; }
-    canvas.style.cursor = hitTest(wx, wy, true) ? 'grab' : 'default';
+    const hs = hitScenery(wx, wy);
+    canvas.style.cursor = hs ? (hs.kind === 'ephyra' ? 'grab' : 'zoom-in')
+                        : hitTest(wx, wy, true) ? 'grab' : 'default';
+    // moving the cursor through the seagrass pushes the blades aside
+    const tNow = performance.now();
+    if (grassPtr.t) {
+      const dts = Math.max(0.005, (tNow - grassPtr.t) / 1000);
+      pushGrass(wx, wy, clamp((wx - grassPtr.x) / dts, -60, 60));
+    }
+    grassPtr.x = wx; grassPtr.t = tNow;
   });
 
   function release() {
+    if (drag.e) {                         // let go of a baby jellyfish: fling it
+      const e = drag.e;
+      e.tvx = clamp(e.hvx || 0, -rows, rows);
+      e.tvy = clamp(e.hvy || 0, -rows, rows);
+      drag.e = null;
+      canvas.style.cursor = 'grab';
+      return;
+    }
     const j = drag.j;
     if (!j) return;
     if (j.kind === 'stauro') {        // springs back on its own (stauroPull)
@@ -380,6 +630,163 @@
   }
   canvas.addEventListener('pointerup', release);
   canvas.addEventListener('pointercancel', release);
+
+  // ================= scrolling between scenes =================
+  // The scenes are stacked like sections of a web page: surface on top, then
+  // open water, then seabed. Dragging on empty space scrolls the view 1:1 —
+  // the next scene slides in from below (or above) while this one slides
+  // away, both alive. Let go past SCROLL.snap of a screen (or flick) and it
+  // rushes on to the next scene — starting slow, fast through the middle,
+  // slowing into place, with speed lines streaking past; otherwise it eases
+  // back. At the top or bottom it only rubber-bands. The ↑/↓ buttons and
+  // arrow keys scroll the same way.
+  const SCROLL = {
+    snap: 0.45,   // fraction of a screen you must scroll before it snaps onward
+    flick: 2.5,   // a flick faster than this (screens per second) also snaps
+    time: 2,      // seconds for the rush to the next scene (incl. speeding up & slowing down)
+    back: 0.35,   // seconds to ease back when it doesn't snap
+    edge: 0.15,   // how much it moves when there's no scene that way
+    gap: 6,       // distance between scenes, in screen heights (> 1 leaves a
+                  // stretch of open water between them, so creatures hanging
+                  // past a scene's edge are out of view before it's left behind)
+  };
+  const sceneSpan = () => rows * SCROLL.gap; // rows from one scene to the next
+  const pan = { active: false, x0: 0, y0: 0, dx: 0, dy: 0, vy: 0, lastY: 0, lastT: 0 };
+  // scroll position in rows: 0 = this scene; +sceneSpan() = fully at the
+  // scene below; −sceneSpan() = fully at the scene above
+  const scroll = { s: 0, target: null, anim: null, v: 0 };
+
+  // ease in and out: slow start, fast middle, slow end
+  const easeInOut = (p) => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2);
+
+  // animate the scroll from where it is now to `to` over `dur` seconds
+  function scrollTo(to, dur) {
+    scroll.target = to;
+    scroll.anim = { from: scroll.s, to, t: 0, dur };
+  }
+
+  const neighbourOf = (dir) => SCENE_ORDER[SCENE_ORDER.indexOf(scene) + dir];
+  const scrollBusy = () => pan.active || scroll.target !== null || scroll.s !== 0;
+
+  // each scene keeps its own creatures, so they're where you left them
+  let sceneLists = {};
+  const listFor = (name) => sceneLists[name] || (sceneLists[name] = buildCreatures(name));
+
+  function endPan() {
+    if (!pan.active) return;
+    pan.active = false;
+    if (Math.abs(pan.dy) < 4 && Math.abs(scroll.s) < 0.5) { scroll.s = 0; updateNav(); return; }
+    const dir = Math.sign(scroll.s);
+    const flick = (-pan.vy / window.innerHeight) * dir;  // screens/s toward that scene
+    const far = Math.abs(scroll.s) > rows * SCROLL.snap;
+    const onward = dir && neighbourOf(dir) && (far || flick > SCROLL.flick);
+    if (onward) scrollTo(dir * sceneSpan(), SCROLL.time);
+    else scrollTo(0, SCROLL.back);
+    updateNav();
+  }
+  canvas.addEventListener('pointerup', endPan);
+  canvas.addEventListener('pointercancel', endPan);
+
+  // buttons / arrow keys: scroll smoothly to the next scene
+  function moveScene(dir) {
+    if (focus.mode !== 'none' || scrollBusy() || !neighbourOf(dir)) return;
+    release();
+    // start it moving so the right neighbour is picked straight away
+    scroll.s = dir * 0.01;
+    scrollTo(dir * sceneSpan(), SCROLL.time);
+    updateNav();
+  }
+
+  function stepScroll(rdt) {
+    const before = scroll.s;
+    if (pan.active) {
+      let raw = -pan.dy / cellH;                       // rows; + = scrolling deeper
+      if (!neighbourOf(Math.sign(raw))) raw *= SCROLL.edge;
+      scroll.s = clamp(raw, -sceneSpan(), sceneSpan());
+      scroll.v = (scroll.s - before) / rdt;
+      return;
+    }
+    const a = scroll.anim;
+    if (!a) { scroll.v = 0; return; }
+    a.t += rdt;
+    const p = Math.min(1, a.t / a.dur);
+    scroll.s = a.from + (a.to - a.from) * easeInOut(p);
+    scroll.v = (scroll.s - before) / rdt;              // rows per second (for the speed lines)
+    if (p >= 1) {
+      scroll.anim = null;
+      if (scroll.target !== 0) {
+        // arrived: the neighbour becomes the current scene
+        scene = neighbourOf(Math.sign(scroll.target));
+        creatures = listFor(scene);
+      }
+      scroll.s = 0;
+      scroll.target = null;
+      updateNav();
+    }
+  }
+
+  // ---------- speed lines ----------
+  // Vertical streaks that rush past while scrolling between scenes: longer
+  // and brighter the faster it's going, moving the opposite way to the
+  // scroll (streaming upward as you dive, downward as you rise).
+  const SPEED_LINES = {
+    count: 0.35,     // streaks per screen column
+    minSpeed: 0.6,   // screens/s before any streaks appear
+    length: 0.06,    // streak length per (row/s) of speed, in rows
+    bright: 0.55,    // brightness at full speed
+  };
+  let streaks = [];
+
+  function makeStreaks() {
+    streaks = Array.from({ length: Math.round(cols * SPEED_LINES.count) }, () => ({
+      x: rand(0, worldW()), y: rand(0, rows), k: rand(0.5, 1.3), b: rand(0.5, 1),
+    }));
+  }
+
+  function drawSpeedLines(rdt) {
+    const v = scroll.v;                                  // rows/s, + = going deeper
+    const speed = Math.abs(v) / rows;                    // screens/s
+    if (!scroll.anim || scroll.anim.to === 0) return; // only once the rush to a new scene has begun
+    if (speed < SPEED_LINES.minSpeed) return;
+    const fade = Math.min(1, (speed - SPEED_LINES.minSpeed) / 2);
+    const pal = hueIdx(v > 0 ? 205 : 190);              // deeper blue diving, lighter rising
+    camY = 0;
+    for (const st of streaks) {
+      // streaks travel the opposite way to the view, a bit faster for depth
+      st.y -= v * st.k * 1.2 * rdt;
+      const len = Math.min(rows * 0.6, Math.abs(v) * SPEED_LINES.length * st.k);
+      if (st.y < -len) { st.y += rows + len * 2; st.x = rand(0, worldW()); }
+      if (st.y > rows + len) { st.y -= rows + len * 2; st.x = rand(0, worldW()); }
+      // the head is brightest; the tail trails behind the way it's moving
+      const tail = v > 0 ? 1 : -1;
+      for (let d = 0; d < len; d += 0.5) {
+        const I = SPEED_LINES.bright * fade * st.b * (1 - d / len);
+        plot(st.x, st.y + tail * d, I, pal);
+      }
+    }
+  }
+
+  // Simulate and draw a scene that isn't the current one (the one sliding
+  // into view while scrolling). Simpler than the main loop: no dragging,
+  // zooming or freezing.
+  function runNeighbour(list, rdt, dt, t) {
+    for (const j of list) {
+      if (j.kind === 'stauro') stauroPull(j, rdt, false); else coast(j, rdt);
+    }
+    collide(rdt, list);
+    const prev = creatures;
+    for (let i = 0; i < list.length; i++) {
+      const j = list[i], sp = SPECIES[j.kind];
+      const jt = t - (j.tOff || 0);
+      jiggle(j, rdt);
+      drawCounted(sp, j, jt);
+      if (shouldReplace(j, sp.update(j, dt, jt), rdt)) {
+        creatures = list;                              // so placement spaces against this scene
+        list[i] = spawnHidden(sp.make());
+        creatures = prev;
+      }
+    }
+  }
 
   // ================= double-click focus (zoom in on one jellyfish) =================
   // Double-click a jellyfish: it grows to fill the screen and glides to the
@@ -429,7 +836,17 @@
     const cx = (a.x0 + a.x1) / 2;
     const t = { x: cx, angle: 0 };
     let Rt;
-    if (j.kind === 'stauro') {
+    if (j.kind === 'polyp') {
+      // base near the bottom, tall enough to see the disc stack and crown
+      const tall = j.src.h * 1.6 + 2;
+      Rt = Math.min((ah * 0.62) / tall, (aw * 0.4) / 4);
+      t.y = a.y1 - ah * 0.12;
+      t.angle = 0;
+    } else if (j.kind === 'ephyra') {
+      const span = 4.2 * j.src.size;                     // arm tip to arm tip at scale 1
+      Rt = Math.min((aw * 0.55) / span, (ah * 0.4) / (1.2 * j.src.size));
+      t.y = (a.y0 + a.y1) / 2;
+    } else if (j.kind === 'stauro') {
       // anchored at its base; reaches ~(stalk + cup + arms) upward
       const up = (j.Hs + j.Hc) / j.R + 0.75;
       Rt = Math.min((aw / 2) * 0.75 / 1.45, (ah * 0.85) / up);
@@ -463,6 +880,7 @@
     // into returns here
     focus.home = { x: j.x, y: j.y, angle: j.angle };
     focus.homeScene = scene;
+    focus.homeKind = j.kind;
     j.tvx = 0; j.tvy = 0;
     canvas.style.cursor = 'zoom-out';
     updateNav();
@@ -482,8 +900,11 @@
     const j = focus.j;
     const target = sceneOf(j.kind);
     if (target !== scene) {
+      // the scene it came from gets a fresh one of the original kind back
+      const oldList = creatures, oi = oldList.indexOf(j);
+      if (oi >= 0) oldList[oi] = SPECIES[focus.homeKind].make();
       scene = target;
-      const list = buildCreatures();
+      const list = listFor(target);
       // it takes the place of the same-kind creature nearest its spot
       let best = -1, bestD = Infinity;
       list.forEach((c, i) => {
@@ -492,6 +913,14 @@
       });
       if (best >= 0) list[best] = j; else list.push(j);
       creatures = list;
+    } else if (!j.proxy && !creatures.includes(j)) {
+      // swapped in from a polyp / ephyra: take the place of the nearest of its kind
+      let best = -1, bestD = Infinity;
+      creatures.forEach((c, i) => {
+        const d = Math.abs(c.x - focus.from.x);
+        if (c.kind === j.kind && d < bestD) { bestD = d; best = i; }
+      });
+      if (best >= 0) creatures[best] = j; else creatures.push(j);
     }
   }
 
@@ -661,6 +1090,28 @@
     },
   };
 
+  // life stages of a true jellyfish (shown when zooming in on one at the seabed)
+  INFO.polyp = {
+    section: 0,
+    group: INFO.scypho.group,
+    species: {
+      name: 'Polyp',
+      latin: 'Scyphistoma — the first life stage of a true jellyfish',
+      blurb: 'Most true jellyfish start life as a tiny polyp stuck to a hard surface (usually the underside of a rock or shell), catching food with a ring of tentacles. It can live like this for months or years, even budding off clones of itself. When conditions change (often the water temperature), it stretches and splits into a stack of discs: strobilation. Each disc swims off as a baby jellyfish.',
+      stats: [['Size', 'a few mm'], ['Lives', 'attached to rocks & shells'], ['Next stage', 'ephyra (baby jellyfish)']],
+    },
+  };
+  INFO.ephyra = {
+    section: 0,
+    group: INFO.scypho.group,
+    species: {
+      name: 'Ephyra',
+      latin: 'Baby jellyfish — a disc released by a polyp',
+      blurb: 'Each disc that pops off a strobilating polyp swims away as an ephyra: a tiny eight-armed star that already pulses like an adult, with a sense organ at the tip of each arm. Over the following weeks it fills in between its arms, grows tentacles and becomes an adult medusa.',
+      stats: [['Size', '~1–5 mm'], ['Arms', '8, each tipped with a sense organ'], ['Next stage', 'adult medusa, in weeks']],
+    },
+  };
+
   const infoEl = document.getElementById('info');
   let hideTimer = null;
 
@@ -738,6 +1189,7 @@
           // restore exactly, then let time run again
           const j = focus.j;
           Object.assign(j, focus.from, { zs: 1 });
+          if (j.proxy && j.kind === 'ephyra') scenery.ephyrae.push({ ...j.src, x: j.x, y: j.y });
           if (j.kind === 'cubo') j.target = j.angle; // don't swerve on resume
           othersFade = 1;
           focus.mode = 'none';
@@ -761,8 +1213,10 @@
   });
 
   canvas.addEventListener('dblclick', (e) => {
-    if (focus.mode !== 'none' || sceneSwitch) return; // zooming / zoomed / switching
+    if (focus.mode !== 'none' || scrollBusy()) return; // zooming / zoomed / scrolling
     const [wx, wy] = toWorldPt(e);
+    const hs = hitScenery(wx, wy);                       // small things first: polyp / baby jellyfish
+    if (hs) { drag.e = null; startFocus(sceneryView(hs)); return; }
     const j = hitTest(wx, wy, true);
     if (j) {
       release();
@@ -777,8 +1231,8 @@
     const ca = Math.cos(j.angle), sa = Math.sin(j.angle);
     const c0 = Math.max(0, Math.floor((j.x - ext) / aspect));
     const c1 = Math.min(cols - 1, Math.ceil((j.x + ext) / aspect));
-    const r0 = Math.max(0, Math.floor(j.y - ext));
-    const r1 = Math.min(rows - 1, Math.ceil(j.y + ext));
+    const r0 = Math.max(Math.floor(-camY), Math.floor(j.y - ext));
+    const r1 = Math.min(Math.ceil(rows - 1 - camY), Math.ceil(j.y + ext));
     const inv = 1 / j.R;
     for (let r = r0; r <= r1; r++) {
       const wy = r - j.y;
@@ -830,25 +1284,43 @@
 
   // ================= environment =================
 
-  // where the surface and seabed are; used to place the man o' war and the
-  // stalked jellyfish (not drawn themselves yet)
-  const surfaceBase = () => Math.max(3, rows * 0.07);
-  const seabedY = (x) => rows - 2.5 - 1.2 * Math.sin(x * 0.025 + 1) - 0.6 * Math.sin(x * 0.07);
+  // where the water surface (surface scene) and seabed (seabed scene) are;
+  // also used to place the man o' war and the stalked jellyfish
+  const SURFACE_LEVEL = 0.3;  // waterline, as a fraction down the screen
+  const SEABED_LEVEL = 0.86;  // top of the sand, as a fraction down the screen
+  const surfaceBase = () => Math.max(3, rows * SURFACE_LEVEL);
+  // Wind direction (+1 = blowing right, −1 = left), random per page load.
+  // The waves, the floats' drift and the rain all follow it.
+  const windDir = Math.random() < 0.5 ? 1 : -1;
+  // phase of the main swell at x — it travels downwind
+  const swellPhase = (x, t) => x * 0.07 - windDir * t * 0.9;
+  // waterline height: a big swell plus faster, smaller wind chop, both
+  // travelling downwind (screen y points down, so smaller y = higher water)
+  const surfaceY = (x, t) => surfaceBase() + 0.7 * Math.sin(swellPhase(x, t)) +
+                             0.35 * Math.sin(x * 0.19 - windDir * t * 1.6);
+  const seabedY = (x) => rows * SEABED_LEVEL - 1.6 * Math.sin(x * 0.025 + 1) -
+                         0.8 * Math.sin(x * 0.07) - 0.4 * Math.sin(x * 0.19 + 2);
+  const hash = (a, b) => {
+    const s = Math.sin(a * 127.1 + b * 311.7) * 43758.5453;
+    return s - Math.floor(s);
+  };
 
-  // ---------- night-sky background ----------
-  // Stars spread evenly over the whole screen: mostly faint, a few bright
-  // ones with a small sparkle. Each twinkles at its own speed, the whole sky
-  // drifts very slowly sideways, and now and then a shooting star streaks by.
-  const STAR_DENSITY = 1 / 90;  // stars per cell
+  // ---------- night sky (surface scene, above the water only) ----------
+  // Stars fill the sky above the waterline: mostly faint, a few bright ones
+  // with a small sparkle, each twinkling at its own speed, the whole sky
+  // drifting slowly sideways, and now and then a shooting star. The sky is
+  // part of the surface scene, so it scrolls away with it as you dive —
+  // underwater there are no stars.
+  const STAR_DENSITY = 1 / 45;  // stars per cell of sky
   const SKY_DRIFT = 0.02;       // sideways drift, rows per second
   let stars = [];
   let shooting = null;
   let nextShoot = 0;
 
   function makeStars() {
-    const n = Math.round(cols * rows * STAR_DENSITY);
+    const n = Math.round(cols * surfaceBase() * STAR_DENSITY);
     stars = Array.from({ length: n }, () => ({
-      x: rand(0, worldW()), y: rand(0, rows),
+      x: rand(0, worldW()), y: rand(0, surfaceBase()),
       b: Math.pow(Math.random(), 3),          // brightness: most stars faint
       f: rand(0.3, 1.6), ph: rand(0, Math.PI * 2),
       pal: STAR_PALS[Math.floor(Math.random() * STAR_PALS.length)],
@@ -858,9 +1330,16 @@
 
   function drawSky(t, dt) {
     const W = worldW();
-    for (const s of stars) {
+    for (const s of stars) {                  // drift even while out of view
       s.x += SKY_DRIFT * dt;
       if (s.x > W) s.x -= W;
+    }
+    const so = surfaceOffset();               // where the surface scene is on screen
+    if (so === null) { shooting = null; return; }
+    camY = so;
+    const above = (x, y) => y < surfaceY(x, t) - 0.8;  // stays clear of the waves
+    for (const s of stars) {
+      if (!above(s.x, s.y)) continue;
       const tw = 0.7 + 0.3 * Math.sin(t * s.f + s.ph);
       const I = (0.06 + 0.5 * s.b) * tw;
       plot(s.x, s.y, I, s.pal);
@@ -868,18 +1347,19 @@
         const sp = I * 0.35;
         plot(s.x - aspect, s.y, sp, s.pal);
         plot(s.x + aspect, s.y, sp, s.pal);
-        plot(s.x, s.y - 1, sp, s.pal);
-        plot(s.x, s.y + 1, sp, s.pal);
+        if (s.y > 1) plot(s.x, s.y - 1, sp, s.pal);
+        if (above(s.x, s.y + 1)) plot(s.x, s.y + 1, sp, s.pal);
       }
     }
 
-    // shooting star: a bright head with a fading tail, crossing in ~1s
+    // shooting star: a bright head with a fading tail, skimming across the
+    // sky above the water in about a second
     nextShoot -= dt;
     if (!shooting && nextShoot <= 0) {
       const dir = Math.random() < 0.5 ? 1 : -1;
-      const ang = rand(0.25, 0.6);
+      const ang = rand(0.06, 0.22);
       shooting = {
-        x: rand(W * 0.15, W * 0.85), y: rand(0, rows * 0.5),
+        x: rand(W * 0.15, W * 0.85), y: rand(0, surfaceBase() * 0.45),
         vx: dir * Math.cos(ang), vy: Math.sin(ang),
         speed: rows * rand(0.8, 1.3), life: 0, dur: rand(0.7, 1.2),
       };
@@ -893,14 +1373,631 @@
       const hy = sh.y + sh.vy * sh.speed * sh.life;
       const tail = rows * 0.12;
       for (let d = 0; d < tail; d += 0.4) {
-        plot(hx - sh.vx * d, hy - sh.vy * d, 0.85 * fade * Math.pow(1 - d / tail, 1.5), STAR_PALS[0]);
+        const x = hx - sh.vx * d, y = hy - sh.vy * d;
+        if (above(x, y)) plot(x, y, 0.85 * fade * Math.pow(1 - d / tail, 1.5), STAR_PALS[0]);
       }
       if (k >= 1) { shooting = null; nextShoot = rand(6, 15); }
     }
+    camY = 0;
+  }
+
+  // ---------- marine snow (all through the water) ----------
+  // Specks of drifting organic matter sinking slowly. They belong to the
+  // ocean, not to a scene: one continuous field that fills all the water —
+  // in the scenes, in the open water between them, while dragging and while
+  // rushing — moving with the view as it scrolls. Hidden above the waterline
+  // and below the sand. Near ones (z → 1) are bigger, brighter and sink
+  // faster; far ones are faint and slow. They sway gently.
+  const SNOW = {
+    density: 1 / 70,   // specks per screen cell
+    bright: 1,         // overall brightness
+    settle: [3, 5],    // seconds a speck rests on the sand before fading
+    fade: 1.2,         // seconds of that spent fading out
+  };
+  let snow = [];
+  let snowStackY = null; // view position in the stack last frame
+
+  function makeSnow() {
+    snow = Array.from({ length: Math.round(cols * rows * SNOW.density) }, () => ({
+      x: rand(0, worldW()), y: rand(0, rows), z: Math.random(), ph: rand(0, 6.28),
+    }));
+    snowStackY = null;
+  }
+
+  // the view's position in the stack of scenes, in rows from the top of the
+  // surface scene (continuous through scrolling and scene changes)
+  const stackY = () => SCENE_ORDER.indexOf(scene) * sceneSpan() + scroll.s;
+
+  function drawSnow(t, dt) {
+    const W = worldW(), sy = stackY();
+    const moved = snowStackY === null ? 0 : sy - snowStackY; // rows the view scrolled
+    snowStackY = sy;
+    const iS = SCENE_ORDER.indexOf('surface') * sceneSpan();
+    const iB = SCENE_ORDER.indexOf('seabed') * sceneSpan();
+    camY = 0;
+    // start a fresh speck sinking from the top edge of the view
+    const respawn = (f) => { f.y = -1; f.x = rand(0, W); f.z = Math.random(); f.rest = 0; f.pat = null; };
+    for (const f of snow) {
+      const tw = 0.75 + 0.25 * Math.sin(t * 1.3 + f.ph * 5);
+      const I = (0.05 + 0.2 * f.z * f.z) * tw * SNOW.bright;
+
+      // resting on the sand: stays put (it moves with the view only because
+      // the seabed does), then fades out and a new speck starts at the top
+      if (f.rest > 0) {
+        f.rest -= dt;
+        f.y = f.landAt - sy;
+        if (f.rest <= 0 || f.y < -1 || f.y > rows + 1) { respawn(f); continue; }
+        plot(f.x, f.y, I * Math.min(1, f.rest / SNOW.fade), SNOW_PAL);
+        continue;
+      }
+
+      // the water moves with the view (scroll), plus sinking and swaying
+      f.y += (0.12 + f.z * 0.55) * dt - moved;
+      f.x += Math.sin(t * 0.3 + f.ph) * (0.03 + f.z * 0.05) * dt;
+      if (f.y < -1 || f.y > rows + 1) {                  // wrap: a fresh speck at the other edge
+        f.y = f.y < -1 ? f.y + rows + 2 : f.y - rows - 2;
+        f.x = rand(0, W); f.z = Math.random();
+        f.pat = null;                                    // jumped: don't treat as landing
+      }
+      // where this speck is in the stack, to skip sky and sand
+      const at = sy + f.y, sand = iB + seabedY(f.x) - 0.5, prev = f.pat;
+      f.pat = at;
+      if (at < iS + surfaceY(f.x, t) + 1) continue;      // above the waterline
+      if (at > sand) {
+        // just sank onto the sand (it was above it last frame): settle there
+        if (prev !== null && prev !== undefined && prev <= sand) {
+          f.rest = rand(SNOW.settle[0], SNOW.settle[1]);
+          f.landAt = sand;
+          f.y = sand - sy;
+          plot(f.x, f.y, I, SNOW_PAL);
+        }
+        continue;                                        // otherwise: under the sand, hidden
+      }
+      plot(f.x, f.y, I, SNOW_PAL);
+      if (f.z > 0.85) plot(f.x + aspect, f.y, I * 0.5, SNOW_PAL); // a few bigger flakes
+    }
+  }
+
+  // ---------- surface scene: the waterline ----------
+  function drawSurface(t) {
+    const depth = rows * 0.4;  // how far the ripples reach below the waterline
+    for (let col = 0; col < cols; col++) {
+      const x = col * aspect;
+      const sy = surfaceY(x, t);
+      // the wave line, with sparkles where the crests catch the light
+      const sparkle = Math.pow(Math.max(0, Math.sin(x * 0.31 - windDir * t * 2.2)), 14);
+      plot(x, sy, 0.6 + 0.35 * sparkle, hueIdx(192));
+      plot(x, sy + 1, 0.28, hueIdx(198));
+      // ripple bands just under the surface, fading into the dark
+      for (let r = Math.round(sy) + 2; r < sy + depth && r < rows; r++) {
+        const d = (r - sy) / depth;                           // 0 at surface → 1 deep
+        const band = Math.pow(Math.max(0, Math.sin(x * 0.11 + r * 0.9 - windDir * t * 1.2) *
+                                          Math.sin(x * 0.04 - r * 0.35 - windDir * t * 0.6)), 3);
+        const I = (0.05 + 0.3 * band) * Math.pow(1 - d, 1.3);
+        if (I > 0.04) plot(x, r, I, hueIdx(200 + 20 * d));
+      }
+    }
+  }
+
+  // ---------- seabed scene: sand, rocks and seaweed ----------
+  let scenery = { rocks: [], weeds: [], rain: [], splashes: [], sparks: [] };
+
+  // ---------- surface scene: plankton sparkles ----------
+  // At night some plankton (dinoflagellates) flash blue-green when the water
+  // around them is disturbed. Here: where raindrops hit, and around a man o'
+  // war moving through the water (dragged, thrown, bobbing back up, splashing
+  // down — just drifting with the wind barely sets them off). Each flash
+  // lights almost instantly and fades within about half a second.
+  const SPARK = {
+    rain: 0.12,      // chance a raindrop sets off a flash
+    float: 5,        // flashes per second per row/s a float moves through the water
+    max: 700,        // most flashes at once
+    bright: 1,
+  };
+
+  function spark(x, y, b = 1) {
+    if (scenery.sparks.length >= SPARK.max) return;
+    scenery.sparks.push({ x, y, born: simTime, dur: rand(0.3, 0.8), b: rand(0.5, 1) * b, hue: rand(170, 195) });
+  }
+
+  function drawSparks(t, dt) {
+    const keep = [];
+    for (const p of scenery.sparks) {
+      const k = (simTime - p.born) / p.dur;               // by the clock, so off-screen ones expire too
+      if (k >= 1) continue;
+      keep.push(p);
+      if (p.y < surfaceY(p.x, t) + 0.5) continue;         // only underwater
+      // flash: up in the first 15% of its life, then a slower fade
+      const I = SPARK.bright * p.b * Math.pow(k < 0.15 ? k / 0.15 : (1 - k) / 0.85, 1.5);
+      const pal = hueIdx(p.hue);
+      plot(p.x, p.y, I, pal);
+      if (I > 0.5) {
+        const sp = I * 0.4;
+        plot(p.x - aspect, p.y, sp, pal); plot(p.x + aspect, p.y, sp, pal);
+        plot(p.x, p.y - 1, sp, pal); plot(p.x, p.y + 1, sp, pal);
+      }
+    }
+    scenery.sparks = keep;
+  }
+
+  // a man o' war disturbing the water: flashes around its float and along a
+  // random stretch of its tentacles, more the faster it moves through it
+  function floatSparks(j, dt) {
+    if (!scenery.sparks) return;
+    // movement through the water (not the steady wind drift, which carries
+    // the water along with it): drags/throws/bumps + bobbing up and down
+    const through = Math.hypot(j.vx || 0, j.vy || 0) + Math.abs(j.fvy || 0);
+    let n = through * SPARK.float * dt;
+    while (n > 0) {
+      if (Math.random() < n) {
+        if (Math.random() < 0.5) {
+          spark(j.x + rand(-1, 1) * j.R, j.y + j.R * j.fh * rand(0.5, 1.4));
+        } else {
+          const f = j.fishing[Math.floor(Math.random() * j.fishing.length)];
+          const along = rand(0, f.len * (j.zs || 1) * 0.8);
+          spark(j.x + f.u * j.flip * j.R + rand(-1, 1), j.y + j.R * j.fh + along, 0.8);
+        }
+      }
+      n -= 1;
+    }
+  }
+
+  // ---------- surface scene: rain ----------
+  // Slanted streaks blown by the wind, falling from the sky and splashing
+  // where they hit the water. Only in the surface scene (the others are
+  // underwater).
+  const RAIN = {
+    density: 0.7,   // drops per screen column
+    speed: 1.6,     // fall speed, screen heights per second
+    slant: 0.28,    // sideways drift per unit of fall (follows the wind)
+    length: 3,      // streak length, rows
+    bright: 0.32,   // streak brightness
+  };
+  const RAIN_PAL = HUES + 1; // cool blue-white
+
+  function newDrop(d, top) {
+    d.x = rand(-rows * 0.4, worldW() + rows * 0.4);
+    d.y = top ? rand(-rows, surfaceBase()) : rand(-rows * 0.3, 0);
+    d.v = rows * RAIN.speed * rand(0.85, 1.15);
+    d.b = RAIN.bright * rand(0.6, 1.1);
+    return d;
+  }
+
+  function drawRain(t, dt) {
+    const L = RAIN.length, vx = windDir * RAIN.slant;
+    for (const d of scenery.rain) {
+      d.y += d.v * dt;
+      d.x += vx * d.v * dt;
+      const hit = surfaceY(d.x, t);
+      if (d.y >= hit) {
+        // splash where it lands, then start again at the top
+        scenery.splashes.push({ x: d.x, y: hit - 0.5, age: 0 });
+        if (Math.random() < SPARK.rain) spark(d.x + rand(-0.5, 0.5), hit + rand(0.8, 2.5), 0.85);
+        newDrop(d, false);
+        continue;
+      }
+      // streak from the head back along its direction of travel
+      for (let s = 0; s < L; s += 0.5) {
+        const y = d.y - s, x = d.x - vx * s;
+        if (y < hit) plot(x, y, d.b * (1 - s / (L + 0.5)), RAIN_PAL);
+      }
+    }
+    // splashes: a tiny burst of droplets that fades in ~0.3 s
+    const keep = [];
+    for (const sp of scenery.splashes) {
+      sp.age += dt;
+      const k = sp.age / 0.3;
+      if (k >= 1) continue;
+      const I = 0.45 * (1 - k);
+      const spread = 0.5 + 2 * k, lift = 1.2 * Math.sin(Math.PI * k);
+      plot(sp.x, sp.y, I, RAIN_PAL);
+      plot(sp.x - spread * aspect, sp.y - lift, I * 0.8, RAIN_PAL);
+      plot(sp.x + spread * aspect, sp.y - lift, I * 0.8, RAIN_PAL);
+      keep.push(sp);
+    }
+    scenery.splashes = keep;
+  }
+
+  // ---------- seabed: seagrass meadow ----------
+  // Ribbon-like blades rooted in the sand, swaying in the current (tips most).
+  // Sweeping the cursor through them pushes them aside; they spring back.
+  // Each stalked jellyfish sits in its own clump of it.
+  const GRASS = {
+    clumps: 1 / 9,          // clumps per screen column (world unit)
+    perClump: [4, 9],       // blades per clump
+    height: [0.1, 0.36],    // blade height range (× screen height)
+    sway: 0.18,             // how far the current tilts the tips (radians)
+    stiff: 6,               // spring-back stiffness after being pushed
+    damp: 2.2,              // spring-back damping
+    push: 0.022,            // how strongly a passing cursor pushes blades
+    maxBend: 1.1,           // most a blade can be bent over (radians, ~60°)
+  };
+
+  const newBlade = (x, h) => ({ x, h, ph: rand(0, 6.28), hue: rand(95, 150),
+    bright: rand(0.25, 0.45), wide: Math.random() < 0.35, bend: 0, bv: 0 });
+
+  // A blade bends like a stalk: it curves more toward the tip, and keeps its
+  // length (a blade pushed over leans and gets lower, it doesn't stretch).
+  // Calls fn(x, y, k) for points along it, k = 0 at the root → 1 at the tip.
+  function walkBlade(b, rootX, rootY, t, fn, zs = 1) {
+    const H = b.h * zs;
+    const tip = clamp(Math.sin(t * 0.7 + b.ph) * GRASS.sway + b.bend, -GRASS.maxBend, GRASS.maxBend);
+    let x = rootX, y = rootY;
+    for (let s = 0; s < H; s += 0.4) {
+      const k = s / H;
+      const ang = tip * k * (1 + 0.15 * Math.sin(t * 1.1 + b.ph * 2 - k * 3)); // a slight ripple along it
+      x += Math.sin(ang) * 0.4;
+      y -= Math.cos(ang) * 0.4;
+      fn(x, y, k);
+    }
+  }
+
+  function stepBlade(b, dt) {
+    b.bv += (-GRASS.stiff * b.bend - GRASS.damp * b.bv) * dt;
+    b.bend = clamp(b.bend + b.bv * dt, -GRASS.maxBend, GRASS.maxBend);
+  }
+
+  function drawBlade(b, rootX, rootY, t, zs = 1) {
+    walkBlade(b, rootX, rootY, t, (x, y, k) => {
+      const I = b.bright * (1 - 0.35 * k), pal = hueIdx(b.hue + 18 * k);
+      plot(x, y, I, pal);
+      if (b.wide && k < 0.6) plot(x + aspect, y, I * 0.7, pal); // broader at the base
+    }, zs);
+  }
+
+  // the cursor sweeping through the grass pushes blades along with it
+  function pushGrass(wx, wy, vx) {
+    if (scene !== 'seabed' || scrollBusy()) return;
+    const t = simTime;
+    for (const b of scenery.weeds) {
+      const ry = seabedY(b.x);
+      if (wy > ry || wy < ry - b.h) continue;
+      // does the cursor pass close to the blade? (the higher up, the more leverage)
+      let hitK = -1;
+      walkBlade(b, b.x, ry, t, (x, y, k) => {
+        if (hitK < 0 && Math.abs(x - wx) < 2 && Math.abs(y - wy) < 1) hitK = k;
+      });
+      if (hitK >= 0) b.bv += vx * GRASS.push * (0.3 + hitK);
+    }
+  }
+
+  // ---------- seabed: the jellyfish life cycle ----------
+  // On a few bigger rocks live tiny polyps — the first stage of a true
+  // jellyfish. Every so often one stretches and segments into a stack of
+  // discs (strobilation); the discs pop off one at a time as baby jellyfish
+  // (ephyrae: tiny eight-armed stars) that pulse their way up out of the
+  // scene. Then the polyp regrows its tentacles and starts over.
+  const POLYP = {
+    rocks: 3,              // rocks with polyps on them
+    perRock: [1, 1],       // polyps per rock
+    size: [0.025, 0.035],  // drawing scale (× screen height): bigger = easier to see
+    period: [35, 60],      // seconds for a full cycle
+    chance: 0.5,           // fraction of cycles in which a polyp strobilates
+    discs: [3, 6],         // discs (future ephyrae) per stack
+    hue: 28,               // pale orange-cream
+  };
+  const EPHYRA = {
+    rise: 10,         // swim speed per pulse
+    hue: 345, bright: 0.55,
+    life: 30,         // seconds before one that lingers fades out
+    atLeast: 1,       // always at least this many swimming in the scene
+    keepAbove: 0.15,  // ...counting only ones below this fraction from the top
+  };
+
+  // height of a rock's outline at f (−1..1 across it)
+  const rockTop = (k, f) => k.h * Math.sqrt(Math.max(0, 1 - f * f)) * (0.85 + 0.15 * Math.sin(f * 5 + k.seed));
+
+  function makeScenery() {
+    const W = worldW();
+    scenery.rocks = Array.from({ length: Math.round(W / 45) + 2 }, () => ({
+      x: rand(0, W), w: rand(3, 9), h: rand(1.5, 4), seed: Math.random() * 10,
+    }));
+    // a few bigger rocks, spread out, for the polyps
+    scenery.polyps = [];
+    scenery.ephyrae = [];
+    for (let i = 0; i < POLYP.rocks; i++) {
+      const rock = { x: W * (i + 0.5) / POLYP.rocks + rand(-W * 0.08, W * 0.08),
+                     w: rand(8, 12), h: rand(4, 6), seed: Math.random() * 10 };
+      scenery.rocks.push(rock);
+      const n = POLYP.perRock[0] + Math.floor(Math.random() * (POLYP.perRock[1] - POLYP.perRock[0] + 1));
+      for (let p = 0; p < n; p++) {
+        scenery.polyps.push({
+          rock, f: n === 1 ? rand(-0.25, 0.25) : rand(-0.65, 0.65), h: rand(2.5, 4),
+          scale: rows * rand(POLYP.size[0], POLYP.size[1]),
+          P: rand(POLYP.period[0], POLYP.period[1]), off: rand(0, 60), ph: rand(0, 6.28),
+          n: POLYP.discs[0] + Math.floor(Math.random() * (POLYP.discs[1] - POLYP.discs[0] + 1)),
+          cycle: -1, released: 0,
+        });
+      }
+    }
+    scenery.rain = Array.from({ length: Math.round(cols * RAIN.density) }, () => newDrop({}, true));
+    scenery.splashes = [];
+    scenery.sparks = [];
+    // the seagrass meadow
+    scenery.weeds = [];
+    const clumps = Math.round(W * GRASS.clumps) + 2;
+    for (let c = 0; c < clumps; c++) {
+      const cx = rand(0, W);
+      const n = GRASS.perClump[0] + Math.floor(Math.random() * (GRASS.perClump[1] - GRASS.perClump[0] + 1));
+      for (let b = 0; b < n; b++) {
+        scenery.weeds.push(newBlade(cx + rand(-2.5, 2.5), rows * rand(GRASS.height[0], GRASS.height[1])));
+      }
+    }
+    grassAroundStalked();
+  }
+
+  // seagrass growing up around each stalked jellyfish, so it sits in the grass
+  function grassAroundStalked() {
+    for (const j of (sceneLists.seabed || [])) {
+      if (j.kind !== 'stauro') continue;
+      const n = 7 + Math.floor(Math.random() * 5);
+      for (let i = 0; i < n; i++) {
+        scenery.weeds.push(newBlade(j.x + rand(-1.8, 1.8) * j.R, rows * rand(0.08, 0.24)));
+      }
+    }
+  }
+
+  // where a polyp sits on its rock, and which way it leans
+  function polypGeom(p, t) {
+    const k = p.rock, base = seabedY(k.x) + 0.5;
+    const slope = (rockTop(k, p.f + 0.05) - rockTop(k, p.f - 0.05)) / (0.1 * k.w);
+    return { bx: k.x + p.f * k.w, by: base - rockTop(k, p.f),
+             tilt: Math.atan(-slope) * 0.8 + 0.08 * Math.sin(t * 0.6 + p.ph) };
+  }
+
+  // where a polyp is in its cycle: body length, discs stacked, tentacles out.
+  // With `g` (its position), it also releases ephyrae as discs pop off.
+  function polypState(p, t, g) {
+    const cyc = Math.floor((t + p.off) / p.P), q = ((t + p.off) % p.P) / p.P;
+    if (g && cyc !== p.cycle) { p.cycle = cyc; p.released = 0; }
+    let len = p.h, discs = 0, tent = 1;
+    const strobilates = hash(cyc, p.ph * 100) < POLYP.chance; // not every cycle
+    if (!strobilates) { /* this cycle it just sits with its tentacles out */ }
+    else if (q < 0.08) tent = q / 0.08;                  // tentacles regrowing
+    else if (q >= 0.5 && q < 0.72) {                     // strobilating: stretch + segment
+      const e = (q - 0.5) / 0.22;
+      len = p.h * (1 + 0.6 * e); discs = Math.ceil(p.n * e); tent = 1 - e;
+    } else if (q >= 0.72) {                              // releasing discs one by one
+      const r = (q - 0.72) / 0.28;
+      const gone = Math.min(p.n, Math.floor(r * (p.n + 1)));
+      while (g && p.released < gone) {                   // each one swims off as an ephyra
+        p.released++;
+        const ux = Math.sin(g.tilt), uy = -Math.cos(g.tilt), L = len * (p.scale || 1);
+        scenery.ephyrae.push({ x: g.bx + ux * L, y: g.by + uy * L, age: 0,
+          size: rand(0.85, 1.25) * babyScale(p), ph: rand(0, 6.28), vx: rand(-0.3, 0.3) });
+      }
+      discs = p.n - p.released; len = p.h * (1 + 0.6 * discs / p.n); tent = 0;
+    }
+    return { len, discs, tent };
+  }
+
+  // draw a polyp from its base (bx, by), leaning by tilt, scaled by zs
+  // (zs > 1 when zoomed in on it)
+  function drawPolypAt(p, st, t, bx, by, tilt, zs = 1) {
+    const ux = Math.sin(tilt), uy = -Math.cos(tilt);     // "up" along the polyp
+    const nx = -uy, ny = ux;                             // across it
+    const len = st.len * zs, discs = st.discs, tent = st.tent;
+    const pal = hueIdx(POLYP.hue);
+    const segStart = len * 0.35;                         // discs stack on the upper body
+    for (let sAlong = 0; sAlong <= len; sAlong += 0.35) {
+      const kk = sAlong / len;
+      let hw = 0.3 + 0.55 * Math.pow(kk, 1.4);           // slim stalk widening to the top
+      let I = 0.32 + 0.12 * kk;
+      if (discs > 0 && sAlong > segStart) {              // segmented: rims with pinches between
+        const seg = (sAlong - segStart) / ((len - segStart) / discs);
+        const rim = Math.pow(Math.abs(Math.sin(Math.PI * seg)), 0.6);
+        hw = 0.55 + 0.7 * rim; I = 0.3 + 0.3 * rim;
+      }
+      hw *= zs;
+      const cx = bx + ux * sAlong, cy = by + uy * sAlong;
+      plot(cx + nx * hw, cy + ny * hw, I, pal);
+      plot(cx - nx * hw, cy - ny * hw, I, pal);
+      if (zs > 1.5) for (let w = -hw + 0.5; w < hw; w += 0.6) plot(cx + nx * w, cy + ny * w, I * 0.35, pal);
+      else plot(cx, cy, I * 0.5, pal);
+    }
+    // crown of tentacles (shrinks away while strobilating)
+    if (tent > 0.05) {
+      const tx = bx + ux * len, ty = by + uy * len;
+      const count = zs > 1.5 ? 12 : 6;
+      for (let i = 0; i < count; i++) {
+        const a = tilt + (i / (count - 1) - 0.5) * 2.2 + 0.15 * Math.sin(t * 1.5 + i + p.ph);
+        const L = (1.2 + 0.5 * Math.sin(i * 1.7)) * tent * zs;
+        for (let d = 0.3; d < L; d += 0.3) plot(tx + Math.sin(a) * d, ty - Math.cos(a) * d, 0.35 * tent, pal);
+      }
+    }
+  }
+
+  function drawPolyp(p, t) {
+    const g = polypGeom(p, t);
+    drawPolypAt(p, polypState(p, t, g), t, g.bx, g.by, g.tilt, p.scale || 1);
+  }
+
+  // babies are sized to match the polyp they came from
+  const babyScale = (p) => Math.max(1, (p.scale || 1) * 0.6);
+
+  // one ephyra: seen slightly from the side, a flattened star of 8 arms, each
+  // tipped with a bright sense organ; it squeezes in on each pulse (c)
+  function drawEphyraAt(x, y, size, c, spin, fade, zs = 1) {
+    const pal = hueIdx(EPHYRA.hue);
+    const w = (1.4 - 0.4 * c) * size * zs;
+    blob(x, y, 0.25 * size * zs, EPHYRA.bright * fade, pal);
+    for (let a = 0; a < 8; a++) {
+      const th = spin + (a * Math.PI) / 4;
+      const ax = Math.cos(th) * w * 1.5, ay = Math.sin(th) * w * 0.4;
+      const front = Math.sin(th) > 0 ? 1 : 0.55;
+      const L = Math.hypot(ax, ay), n = Math.max(3, Math.ceil(L / 0.35));
+      for (let i = 1; i < n; i++) plot(x + ax * i / n, y + ay * i / n, 0.35 * front * fade, pal);
+      blob(x + ax, y + ay, 0.12 * size * zs, EPHYRA.bright * 1.2 * front * fade, pal);
+    }
+  }
+
+  // ephyrae: tiny eight-armed baby jellyfish pulsing their way upward
+  function drawEphyrae(dt, t) {
+    const keep = [];
+    const rdt = dt / TIME_SCALE;                          // real seconds, for dragging
+    for (const e of scenery.ephyrae) {
+      e.age += dt;
+      const c = Math.pow(0.5 + 0.5 * Math.sin(e.age * 3.2 + e.ph), 2);   // pulse
+      if (drag.e === e) {
+        // held: follows the pointer (and keeps pulsing); measure its speed for a fling
+        const f = Math.min(1, rdt * 12);
+        const mx = (drag.x + drag.offX - e.x) * f, my = (drag.y + drag.offY - e.y) * f;
+        e.x += mx; e.y += my;
+        e.hvx = mx / rdt; e.hvy = my / rdt;
+        e.age = Math.min(e.age, EPHYRA.life - 5);         // doesn't fade away while held
+      } else {
+        e.y -= (0.3 + EPHYRA.rise * c) * e.size * dt;
+        e.x += (e.vx + Math.sin(e.age * 0.7 + e.ph) * 0.3) * dt;
+        if (e.tvx || e.tvy) {                             // flung: glides to a stop in the water
+          e.x += e.tvx * rdt; e.y += e.tvy * rdt;
+          const k = Math.exp(-rdt * 2.2);
+          e.tvx *= k; e.tvy *= k;
+          if (Math.abs(e.tvx) + Math.abs(e.tvy) < 0.05) e.tvx = e.tvy = 0;
+        }
+      }
+      if (drag.e !== e && (e.y < -8 || e.age > EPHYRA.life)) continue;
+      keep.push(e);
+      const fade = Math.min(1, e.age * 2, (EPHYRA.life - e.age) / 4); // fade in, and out if it lingers
+      drawEphyraAt(e.x, e.y, e.size, c, e.age * 0.25 + e.ph, fade, 1);
+    }
+    scenery.ephyrae = keep;
+
+    // always at least one baby jellyfish swimming in the scene: if none are
+    // (or the last is about to swim out the top), a polyp releases another
+    const inScene = keep.filter((e) => e.y > rows * EPHYRA.keepAbove && e.y < rows).length;
+    if (inScene < EPHYRA.atLeast && scenery.polyps && scenery.polyps.length) releaseOne(t);
+  }
+
+  // pop a baby jellyfish off the top of a polyp — one that's mid-strobilation
+  // if there is one, so it usually comes off a stack of discs
+  function releaseOne(t) {
+    const busy = scenery.polyps.filter((p) => polypState(p, t, null).discs > 0);
+    const pool = busy.length ? busy : scenery.polyps;
+    const p = pool[Math.floor(Math.random() * pool.length)];
+    const g = polypGeom(p, t), st = polypState(p, t, null), L = st.len * (p.scale || 1);
+    scenery.ephyrae.push({ x: g.bx + Math.sin(g.tilt) * L, y: g.by - Math.cos(g.tilt) * L,
+      age: 0, size: rand(0.85, 1.25) * babyScale(p), ph: rand(0, 6.28), vx: rand(-0.3, 0.3) });
+  }
+
+  // ---------- zooming in on a polyp or an ephyra ----------
+  // They're scenery, not creatures, so zooming uses a stand-in ("view") that
+  // the focus system can grow and move like a creature. A polyp's stand-in
+  // keeps following the real polyp's cycle; an ephyra is lifted out of the
+  // water while you look at it and put back where it was afterwards.
+  const POLYP_VIEW = {
+    draw(j, t) { drawPolypAt(j.src, polypState(j.src, t, null), t, j.x, j.y, j.angle, j.R); },
+    update() { return false; },
+  };
+  const EPHYRA_VIEW = {
+    draw(j, t) {
+      const c = Math.pow(0.5 + 0.5 * Math.sin(t * 3.2 + j.src.ph), 2);
+      drawEphyraAt(j.x, j.y, j.src.size, c, t * 0.25 + j.src.ph, 1, j.R);
+    },
+    update() { return false; },
+  };
+
+  // a polyp or ephyra under the pointer (seabed scene only)
+  function hitScenery(wx, wy) {
+    if (scene !== 'seabed' || !scenery.polyps) return null;
+    for (const e of scenery.ephyrae) {
+      if (Math.hypot((wx - e.x) / (2.2 * e.size), (wy - e.y) / (1.4 * e.size)) < 1) return { kind: 'ephyra', src: e };
+    }
+    const t = simTime;
+    for (const p of scenery.polyps) {
+      const g = polypGeom(p, t), st = polypState(p, t, null);
+      const ux = Math.sin(g.tilt), uy = -Math.cos(g.tilt);
+      // distance from the pointer to the polyp's body (plus its crown)
+      const dx = wx - g.bx, dy = wy - g.by;
+      const sc = p.scale || 1;
+      const along = clamp(dx * ux + dy * uy, 0, (st.len + 1.5) * sc);
+      if (Math.hypot(dx - ux * along, dy - uy * along) < 1.6 * sc) return { kind: 'polyp', src: p };
+    }
+    return null;
+  }
+
+  // make the stand-in for a hit polyp / ephyra, ready to zoom
+  function sceneryView(hit) {
+    const H = hit.kind === 'polyp' ? POLYP.hue : EPHYRA.hue;
+    const v = { proxy: true, kind: hit.kind, src: hit.src, R: hit.kind === 'polyp' ? (hit.src.scale || 1) : 1, swims: false,
+                hue: H, hueDir: 1, shade: (o) => hueIdx(H + o * SPREAD), tvx: 0, tvy: 0 };
+    if (hit.kind === 'polyp') {
+      const g = polypGeom(hit.src, simTime);
+      Object.assign(v, { x: g.bx, y: g.by, angle: g.tilt });
+    } else {
+      Object.assign(v, { x: hit.src.x, y: hit.src.y, angle: 0 });
+      scenery.ephyrae.splice(scenery.ephyrae.indexOf(hit.src), 1); // lifted out while viewed
+    }
+    return v;
+  }
+
+  function drawSeabed(t, dt) {
+    // sand: a bright-ish contour, textured below and darker with depth
+    for (let col = 0; col < cols; col++) {
+      const x = col * aspect;
+      const by = seabedY(x);
+      plot(x, by, 0.45 + 0.1 * hash(col, 1), SAND_PAL);
+      for (let r = Math.round(by) + 1; r < rows; r++) {
+        const n = hash(col, r);
+        const fade = 1 - Math.min(1, (r - by) / (rows * 0.16));
+        const I = (0.1 + 0.25 * n) * (0.35 + 0.65 * fade);
+        if (n > 0.25) plot(x, r, I, SAND_PAL);
+      }
+    }
+
+    // rocks: lumpy mounds sitting on the sand, lit from above
+    for (const k of scenery.rocks) {
+      const base = seabedY(k.x) + 0.5;
+      for (let dx = -k.w; dx <= k.w; dx += aspect) {
+        const f = dx / k.w;
+        const top = k.h * Math.sqrt(Math.max(0, 1 - f * f)) * (0.85 + 0.15 * Math.sin(f * 5 + k.seed));
+        for (let up = 0; up <= top; up += 1) {
+          const edge = up > top - 1 ? 0.45 : 0.18 + 0.12 * (up / k.h); // brighter rim on top
+          plot(k.x + dx, base - up, edge * (0.8 + 0.2 * hash(dx * 3 + k.seed, up)), ROCK_PAL);
+        }
+      }
+    }
+
+    // the seagrass meadow
+    for (const b of scenery.weeds) {
+      stepBlade(b, dt);
+      drawBlade(b, b.x, seabedY(b.x), t);
+    }
+
+    // polyps on the rocks, and the baby jellyfish they release
+    for (const p of scenery.polyps || []) drawPolyp(p, t);
+    drawEphyrae(dt, t);
+  }
+
+  function drawSceneryFor(name, t, dt) {
+    if (name === 'surface') { drawSurface(t); drawRain(t, dt); drawSparks(t, dt); }
+    if (name === 'seabed') drawSeabed(t, dt);
   }
 
   function drawEnvironment(t, dt) {
-    drawSky(t, dt);
+    camY = 0;
+    drawSky(t, dt);                       // the sky (surface scene, above water)
+    drawSnow(t, dt);                      // marine snow through all the water
+    // Every scene's scenery keeps running (rain, sparkles, seagrass, polyps,
+    // baby jellyfish...) as if you were watching each one, drawn in its place
+    // in the stack. This scene's fades when zooming in.
+    for (const name of SCENE_ORDER) {
+      plotGain = name === scene ? othersFade : 1;
+      camY = offsetOf(name);
+      drawSceneryFor(name, t, dt);
+    }
+    plotGain = 1;
+    camY = 0;
+  }
+
+  // how far (rows) a scene is drawn from the view: 0 = exactly in view
+  const offsetOf = (name) =>
+    (SCENE_ORDER.indexOf(name) - SCENE_ORDER.indexOf(scene)) * sceneSpan() - scroll.s;
+
+  // where the surface scene currently is on screen (rows), or null if it's
+  // nowhere near the view
+  function surfaceOffset() {
+    const o = offsetOf('surface');
+    return Math.abs(o) < rows * 1.5 ? o : null;
   }
 
   // ================= 1. TRUE JELLYFISH (Scyphozoa) =================
@@ -1294,7 +2391,7 @@
       }
     },
 
-    update() { return false; }, // stays put
+    update() { return false; }, // stays put on the sand
   };
 
   // ================= 4. HYDROMEDUSA (Hydrozoa) =================
@@ -1396,12 +2493,45 @@
   // surface, a cluster of feeding polyps hangs beneath, and a few very long
   // beaded fishing tentacles trail down. Drifts sideways with the wind.
 
+  // how the man o' war's float returns to the waterline
+  const FLOAT = {
+    spring: 5,     // pull toward the waterline per row away
+    maxRise: 40,   // strongest pull (caps the rising/sinking speed when far away)
+    drag: 2.4,     // water resistance (lower = more bobbing as it settles)
+    gravity: 90,   // pull down when lifted out of the water (rows/s²)
+    airDrag: 0.4,  // air resistance while falling (much less than water)
+    splash: 0.35,  // speed kept when it hits the water (lower = shallower plunge)
+    surge: 1.2,    // back-and-forth push from passing waves (rows/s)
+    tilt: 1.5,     // how strongly it tilts with the wave slope
+  };
+
   const Siphono = {
     make(initial) {
       const Fl = Math.max(5, rows * rand(0.09, 0.13)); // float half-length
-      const dir = Math.random() < 0.5 ? 1 : -1;
+      const dir = windDir;
       const W = worldW();
-      const x = initial ? rand(Fl, W - Fl) : (dir > 0 ? -Fl * 1.5 : W + Fl * 1.5);
+      let x;
+      if (initial) {
+        // spread out across the screen, away from the other floats
+        let best = -1;
+        for (let k = 0; k < 10; k++) {
+          const cx = rand(Fl, W - Fl);
+          let near = Infinity;
+          for (const o of creatures) if (o.kind === 'siphono') near = Math.min(near, Math.abs(cx - o.x));
+          if (near > best) { best = near; x = cx; }
+        }
+      } else {
+        // drift in from just past the upwind edge — but behind any float
+        // that is still coming in there, so they don't overlap
+        let out = Fl * 1.3;
+        for (const o of creatures) {
+          if (o.kind !== 'siphono') continue;
+          const oOut = dir > 0 ? -o.x : o.x - W;     // how far past the edge it is (−ve = on screen)
+          if (oOut > Fl * 4) continue;               // far off-screen: about to be replaced, ignore
+          out = Math.max(out, oOut + (o.R + Fl) * 1.15); // just far enough not to overlap
+        }
+        x = dir > 0 ? -out : W + out;
+      }
       const nF = 5 + Math.floor(Math.random() * 5);
       const nZ = 18 + Math.floor(Math.random() * 10);
       return {
@@ -1410,7 +2540,7 @@
         fh: rand(0.3, 0.38),                 // float height / length
         flip: Math.random() < 0.5 ? 1 : -1,  // which end tapers
         dir,
-        speed: rand(0.6, 1.1),
+        speed: rand(1.2, 2.0),             // wind drift, rows per second
         ph: rand(0, Math.PI * 2),
         fishing: Array.from({ length: nF }, () => ({
           u: rand(-0.7, 0.1), len: rows * rand(0.45, 0.9),
@@ -1483,25 +2613,61 @@
       }
     },
 
-    update(j, dt, t) {
-      j.x += j.dir * j.speed * dt;
-      j.y = surfaceBase() - j.R * j.fh * 0.35 + 0.4 * Math.sin(t * 0.9 + j.ph); // bob
-      j.angle = 0.05 * Math.sin(t * 0.7 + j.ph);
-      const m = j.R * 2.5;
-      return j.x < -m || j.x > worldW() + m;
+    update(j, dt) {
+      const wt = simTime; // the same clock the drawn waves use
+      // blown along by the wind, plus a little back-and-forth as each wave
+      // passes underneath (water at a crest moves forward, in a trough back)
+      // height of the swell here: +1 at a crest, −1 in a trough
+      const crest = -Math.sin(swellPhase(j.x, wt));
+      j.x += (j.dir * j.speed + j.dir * FLOAT.surge * crest) * dt;
+
+      // Buoyancy: the float wants to ride the wave right under it. Pushed
+      // under, it rises back at a steady rate, slowed by the water; lifted
+      // into the air, it drops back. A little overshoot gives a bob.
+      const rest = surfaceY(j.x, wt) - j.R * j.fh * 0.35;
+      j.fvy = j.fvy || 0;
+      const inAir = j.y < rest - 0.5;
+      if (inAir) {
+        // out of the water: falls under gravity, with only light air drag
+        j.fvy += (FLOAT.gravity - FLOAT.airDrag * j.fvy) * dt;
+      } else {
+        // hitting the water from the air: the splash soaks up most of the speed
+        if (j.wasInAir) {
+          j.fvy *= FLOAT.splash;
+          j.tvy = (j.tvy || 0) * FLOAT.splash;
+          j.wv = (j.wv || 0) + 1.5; // float squashes on impact
+        }
+        // in the water: buoyancy pulls it back to the waterline
+        const pull = clamp((rest - j.y) * FLOAT.spring, -FLOAT.maxRise, FLOAT.maxRise);
+        j.fvy += (pull - FLOAT.drag * j.fvy) * dt;
+      }
+      j.wasInAir = inAir;
+      j.y += j.fvy * dt;
+
+      // tilt to match the slope of the water under it
+      const slope = (surfaceY(j.x + 1, wt) - surfaceY(j.x - 1, wt)) / 2;
+      const tilt = Math.atan(slope) * FLOAT.tilt;
+      j.angle += (tilt - j.angle) * Math.min(1, dt * 3);
+
+      // gone as soon as all of it (float + tentacles trailing upwind) has
+      // drifted off the downwind edge, so a replacement comes in right away
+      if (j.trail === undefined) j.trail = Math.max(...j.fishing.map((f) => f.len)) * 0.15;
+      const m = j.R * 1.1 + j.trail + 1;
+      return j.dir > 0 ? j.x > worldW() + m : j.x < -m;
     },
   };
 
-  const SPECIES = { scypho: Scypho, cubo: Cubo, stauro: Stauro, hydro: Hydro, siphono: Siphono };
+  const SPECIES = { scypho: Scypho, cubo: Cubo, stauro: Stauro, hydro: Hydro, siphono: Siphono,
+                    polyp: POLYP_VIEW, ephyra: EPHYRA_VIEW };
 
   // ================= population & loop =================
 
-  // a fresh set of creatures for the current scene
-  function buildCreatures() {
+  // a fresh set of creatures for a scene (the current one by default)
+  function buildCreatures(name = scene) {
     const list = [];
     const prev = creatures;
     creatures = list; // so placement (pickX etc.) spaces them against each other
-    for (const [kind, n] of Object.entries(SCENES[scene])) {
+    for (const [kind, n] of Object.entries(SCENES[name])) {
       for (let i = 0; i < n; i++) {
         // spread the first swimmers from the top of the screen to just below it
         const y = rows * (0.1 + ((i + Math.random()) / n) * 1.1);
@@ -1515,58 +2681,25 @@
   function populate() {
     // a new set of creatures (e.g. after a resize) cancels any zoom
     focus.mode = 'none'; focus.j = null; othersFade = 1;
-    sceneSwitch = null;
+    scroll.s = 0; scroll.target = null; scroll.anim = null; scroll.v = 0; pan.active = false;
     hideInfo();
-    creatures = buildCreatures();
+    sceneLists = {};
+    for (const name of SCENE_ORDER) listFor(name);    // every scene exists from the start
+    creatures = listFor(scene);
     makeStars();
+    makeSnow();
+    makeScenery();
+    makeStreaks();
     updateNav();
   }
 
-  // ================= moving between scenes =================
-  // ↑/↓ buttons (and arrow keys) fade the current scene's creatures out and
-  // the neighbouring scene's in.
-
-  const SCENE_FADE = 0.5; // seconds for each half of the fade
-  let sceneSwitch = null; // { to, p, phase: 'out' | 'in' }
   const navEl = document.getElementById('scene-nav');
-
-  function moveScene(dir) {
-    const i = SCENE_ORDER.indexOf(scene) + dir;
-    if (i < 0 || i >= SCENE_ORDER.length) return;
-    goToScene(SCENE_ORDER[i]);
-  }
-
-  function goToScene(name) {
-    if (focus.mode !== 'none' || sceneSwitch || name === scene) return;
-    release();
-    sceneSwitch = { to: name, p: 0, phase: 'out' };
-    updateNav();
-  }
-
-  function stepSceneSwitch(rdt) {
-    const s = sceneSwitch;
-    if (!s) return;
-    s.p = Math.min(1, s.p + rdt / SCENE_FADE);
-    othersFade = s.phase === 'out' ? 1 - ease(s.p) : ease(s.p);
-    if (s.p < 1) return;
-    if (s.phase === 'out') {
-      scene = s.to;
-      creatures = buildCreatures();
-      s.phase = 'in';
-      s.p = 0;
-      othersFade = 0;
-    } else {
-      sceneSwitch = null;
-      othersFade = 1;
-    }
-    updateNav();
-  }
 
   // show ↑ / ↓ buttons for the neighbouring scenes (hidden while zoomed in)
   function updateNav() {
     if (!navEl) return;
     const i = SCENE_ORDER.indexOf(scene);
-    const busy = focus.mode !== 'none' || !!sceneSwitch;
+    const busy = focus.mode !== 'none' || scrollBusy();
     navEl.classList.toggle('is-hidden', focus.mode !== 'none');
     navEl.innerHTML = `
       ${i > 0 ? `<button type="button" data-dir="-1" ${busy ? 'disabled' : ''}>↑ ${SCENE_LABEL[SCENE_ORDER[i - 1]]}</button>` : ''}
@@ -1587,11 +2720,23 @@
     const t = simTime;
 
     field.fill(0);
+    stepScroll(rdt); // scroll position first, so everything this frame uses it
     drawEnvironment(t, dt);
 
     stepFocus(rdt);
-    stepSceneSwitch(rdt);
     const focused = focus.mode !== 'none'; // time stops for everything else
+    camY = -scroll.s;                      // this scene scrolls with the view
+
+    // dragging / throws / pulls first, then bump everything apart, so the
+    // tentacle and bell jiggle below responds to both
+    if (!focused) {
+      for (const j of creatures) {
+        const held = drag.j === j;
+        if (j.kind === 'stauro') stauroPull(j, rdt, held);
+        else if (held) dragFollow(j, rdt); else coast(j, rdt);
+      }
+      collide(rdt);
+    }
 
     for (let i = 0; i < creatures.length; i++) {
       const j = creatures[i];
@@ -1604,22 +2749,38 @@
       plotGain = isFocus ? focusGain : othersFade;
       if (!focused) {
         const held = drag.j === j;
-        if (j.kind === 'stauro') stauroPull(j, rdt, held);
-        else if (held) dragFollow(j, rdt); else coast(j, rdt);
         jiggle(j, rdt);
-        if (plotGain > 0.01) sp.draw(j, jt);
+        if (plotGain > 0.01) drawCounted(sp, j, jt); // (faded out: keep the last count)
         // a held creature doesn't swim on its own and can't leave the screen
-        if (!held && sp.update(j, dt, jt)) {
+        if (!held && shouldReplace(j, sp.update(j, dt, jt), rdt)) {
           creatures.splice(i, 1);
-          creatures.splice(i, 0, sp.make());
+          creatures.splice(i, 0, spawnHidden(sp.make()));
         }
       } else {
         // focused jelly keeps pulsing in place; the rest are frozen
         if (isFocus) jiggle(j, rdt);
-        if (plotGain > 0.01) sp.draw(j, jt);
+        if (plotGain > 0.01) drawCounted(sp, j, jt);
       }
     }
+    if (focus.j && focus.j.proxy) {
+      plotGain = focusGain;
+      drawCounted(SPECIES[focus.j.kind], focus.j, t);
+    }
     plotGain = 1;
+
+    // Every other scene keeps running too, as if you were on each one, and
+    // is drawn in its place in the stack — so whatever of them comes into
+    // view (a scene sliding in, a straggler hanging past an edge) is already
+    // there, and only ever leaves by moving out of view.
+    if (!focused) {
+      for (const name of SCENE_ORDER) {
+        if (name === scene) continue;
+        camY = offsetOf(name);
+        runNeighbour(listFor(name), rdt, dt, t);
+      }
+    }
+    camY = 0;
+    drawSpeedLines(rdt);
 
     // render the grid
     ctx.globalCompositeOperation = 'source-over';
