@@ -571,8 +571,11 @@
   canvas.style.touchAction = 'none';
 
   canvas.addEventListener('pointerdown', (e) => {
-    if (room.mode !== 'none') {                           // in the cave: click the jellyfish
-      if (room.mode === 'on' && partAt(e.clientX, e.clientY)) room.alarm = 0;
+    if (room.mode !== 'none') {                           // in the cave: drag to turn it, click it for the alarm
+      if (room.mode !== 'on') return;
+      room.turn = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, t: performance.now(), moved: false };
+      room.wx = 0; room.wy = 0;
+      canvas.setPointerCapture(e.pointerId);
       return;
     }
     if (focus.mode !== 'none' || scrollBusy()) return; // no dragging while zoomed / scrolling
@@ -622,10 +625,28 @@
 
   const grassPtr = { x: 0, t: 0 };
   canvas.addEventListener('pointermove', (e) => {
-    if (room.mode !== 'none') {                           // in the cave: hovering its parts
+    if (room.mode !== 'none') {                           // in the cave: turning it, or hovering its parts
       room.px = e.clientX; room.py = e.clientY;
+      const tr = room.turn;
+      if (tr) {
+        if (!tr.moved && Math.hypot(e.clientX - tr.x0, e.clientY - tr.y0) > 5) tr.moved = true;
+        if (tr.moved) {
+          const now = performance.now(), dts = Math.max(0.008, (now - tr.t) / 1000);
+          let ax = (e.clientX - tr.x) * ROOM.turnSpeed, ay = (e.clientY - tr.y) * ROOM.turnSpeed;
+          const cap = ROOM.turnMax * dts, m = Math.hypot(ax, ay);
+          if (m > cap) { ax *= cap / m; ay *= cap / m; }
+          turnRoom(ax, ay);
+          // its spin, for when you let go (smoothed)
+          room.wx = room.wx * 0.5 + (ax / dts) * 0.5; room.wy = room.wy * 0.5 + (ay / dts) * 0.5;
+          tr.x = e.clientX; tr.y = e.clientY; tr.t = now;
+          room.idle = 0; room.hover = 0;
+          canvas.style.cursor = 'grabbing';
+          updateRoomTip();
+          return;
+        }
+      }
       room.hover = room.mode === 'on' ? partAt(e.clientX, e.clientY) : 0;
-      canvas.style.cursor = room.hover ? 'pointer' : 'default';
+      canvas.style.cursor = room.mode !== 'on' ? 'default' : room.hover ? 'pointer' : 'grab';
       updateRoomTip();
       return;
     }
@@ -682,6 +703,25 @@
   }
   canvas.addEventListener('pointerup', release);
   canvas.addEventListener('pointercancel', release);
+  // in the cave: letting go ends a turn — or, if you didn't move, was a click
+  const endTurn = (e) => {
+    const tr = room.turn;
+    if (!tr) return;
+    room.turn = null;
+    if (!tr.moved) {
+      room.wx = 0; room.wy = 0;
+      if (e.type === 'pointerup' && room.mode === 'on' && partAt(e.clientX, e.clientY)) room.alarm = 0;
+    } else {
+      // only keep spinning if it was still moving when you let go
+      if (performance.now() - tr.t > 80) { room.wx = 0; room.wy = 0; }
+      const m = Math.hypot(room.wx, room.wy);
+      if (m > ROOM.turnMax) { room.wx *= ROOM.turnMax / m; room.wy *= ROOM.turnMax / m; }
+      room.idle = 0;
+    }
+    canvas.style.cursor = room.mode === 'on' ? 'grab' : 'default';
+  };
+  canvas.addEventListener('pointerup', endTurn);
+  canvas.addEventListener('pointercancel', endTurn);
 
   // ================= scrolling between scenes =================
   // The scenes are stacked like sections of a web page: surface on top, then
@@ -3064,6 +3104,12 @@
     squeeze: 0.24,     // how much the rim pulls in on each beat (the dome barely changes)
     surge: 0.1,        // how far each beat pushes it forward (× bell radius) before it glides back
     tentWild: 1.1,     // how much the tentacles move about (0 = still)
+    size: 1.35,        // how big the jellyfish is
+    turnSpeed: 0.004,  // how far it turns per pixel you drag (radians)
+    turnMax: 5,        // fastest it can spin (radians per second) — so the tentacles don't whip
+    turnCoast: 2.5,    // how quickly a flick's spin dies away after you let go (higher = sooner)
+    turnBack: 4,       // seconds after you let go before it eases back to its usual angle (0 = never)
+    turnBackSpeed: 0.8, // how quickly it eases back
     detail: 1,         // the room's grid is this many times finer than the rest (2 = half-size characters; higher = slower)
     // its light spills into the water around it, faintly colouring the
     // nearby characters — a close glow and a wide, faint haze
@@ -3096,7 +3142,31 @@
     longTentacle: 6,   // length of the long tentacle (× bell radius) — real ones reach 1.5–36× the bell's width
     alarm: 3.2,        // seconds the light display lasts
   };
-  const room = { mode: 'none', p: 0, hover: 0, alarm: -1, px: -1, py: -1 };
+  const room = { mode: 'none', p: 0, hover: 0, alarm: -1, px: -1, py: -1,
+    q: [1, 0, 0, 0],   // how you've turned it (a rotation, as a quaternion: w, x, y, z)
+    wx: 0, wy: 0,      // its spin right now (radians per second, about the screen's x and y)
+    idle: 0,           // seconds since you last turned it
+    turn: null };      // the drag in progress, if any
+
+  // ---- rotations (quaternions) for turning the Atolla ----
+  const qMul = (a, b) => [
+    a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+    a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+    a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
+    a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0]];
+  const qNorm = (q) => { const l = Math.hypot(q[0], q[1], q[2], q[3]) || 1; return [q[0] / l, q[1] / l, q[2] / l, q[3] / l]; };
+  const qAxis = (x, y, z, ang) => { const h = ang / 2, s = Math.sin(h); return [Math.cos(h), x * s, y * s, z * s]; };
+  // turn a direction by rotation q
+  const qRot = (q, v) => {
+    const [w, x, y, z] = q, [vx, vy, vz] = v;
+    const tx = 2 * (y * vz - z * vy), ty = 2 * (z * vx - x * vz), tz = 2 * (x * vy - y * vx);
+    return [vx + w * tx + (y * tz - z * ty), vy + w * ty + (z * tx - x * tz), vz + w * tz + (x * ty - y * tx)];
+  };
+  // turn it by dragging: sideways spins it about the screen's up-down line,
+  // up/down tips it toward / away from you
+  function turnRoom(ax, ay) {
+    room.q = qNorm(qMul(qMul(qAxis(0, 1, 0, ax), qAxis(1, 0, 0, ay)), room.q));
+  }
   let masterGain = 1;  // whole-picture brightness (fades scenes / the room in and out)
   let partMap = null;  // which part of the Atolla each cell shows (for hovering)
   let curPart = 0;
@@ -3347,7 +3417,7 @@
 
   function drawAtolla(t) {
     const W = worldW();
-    const Rb = Math.min(W * 0.17, rows * 0.3);            // bell radius (the tentacles make up the length)
+    const Rb = Math.min(W * 0.17, rows * 0.3) * ROOM.size; // bell radius (the tentacles make up the length)
     const beatLen = 1 / ROOM.pulseF;
     // the beat: a quick squeeze, then a slow refill (0 relaxed … 1 squeezed)
     const pulseAt = (tt) => {
@@ -3365,7 +3435,7 @@
       const q = (ph - 0.2) / 0.8; return 1 - q * q * (3 - 2 * q);                       // slow glide back while it refills
     };
     const fwd = surgeAt(t - 0.25);                         // (in step with the rim's squeeze)
-    const cx0 = W * 0.4, cy0 = rows * 0.3;
+    const cx0 = W * 0.45, cy0 = rows * 0.31;
     const spin = t * ROOM.spin;
 
     // its own frame: a = the way it swims, e1 / e2 = across the bell. The
@@ -3373,8 +3443,10 @@
     const vn = (v) => { const l = Math.hypot(v[0], v[1], v[2]); return [v[0] / l, v[1] / l, v[2] / l]; };
     const vx = (p, q) => [p[1] * q[2] - p[2] * q[1], p[2] * q[0] - p[0] * q[2], p[0] * q[1] - p[1] * q[0]];
     const A0 = ROOM.axis, wob = ROOM.wobble;
-    const ax = vn([A0[0] + wob * Math.sin(t * 0.23), A0[1] + wob * 0.6 * Math.sin(t * 0.31 + 1), A0[2] + wob * Math.sin(t * 0.17 + 2)]);
-    const e1 = vn(vx([0, 0, 1], ax)), e2 = vx(ax, e1);
+    const axB = vn([A0[0] + wob * Math.sin(t * 0.23), A0[1] + wob * 0.6 * Math.sin(t * 0.31 + 1), A0[2] + wob * Math.sin(t * 0.17 + 2)]);
+    const e1b = vn(vx([0, 0, 1], axB)), e2b = vx(axB, e1b);
+    // …then turned however you've dragged it
+    const ax = qRot(room.q, axB), e1 = qRot(room.q, e1b), e2 = qRot(room.q, e2b);
     const e10 = e1[0], e11 = e1[1], e12 = e1[2], a0 = ax[0], a1 = ax[1], a2 = ax[2], e20 = e2[0], e21 = e2[1], e22 = e2[2];
     // it moves along the way it's facing
     const push = ROOM.surge * Rb * fwd;
@@ -3660,6 +3732,7 @@
     if (room.mode !== 'none') return;
     release();
     room.mode = 'enter'; room.p = 0; room.hover = 0; room.alarm = -1;
+    room.q = [1, 0, 0, 0]; room.wx = 0; room.wy = 0; room.idle = 0; room.turn = null;
     portalHover = false;
     canvas.style.cursor = 'default';
     updateNav();
@@ -3682,6 +3755,23 @@
       if (room.p >= 1) { room.mode = 'none'; updateNav(); }
     }
     if (room.alarm >= 0) { room.alarm += rdt; if (room.alarm > ROOM.alarm) room.alarm = -1; }
+    // turning: after a flick it keeps spinning for a moment, then — if you
+    // leave it alone — drifts back to its usual angle
+    if (room.mode === 'on' && !(room.turn && room.turn.moved)) {
+      if (room.wx || room.wy) {
+        turnRoom(room.wx * rdt, room.wy * rdt);
+        const k = Math.exp(-ROOM.turnCoast * rdt);
+        room.wx *= k; room.wy *= k;
+        if (Math.hypot(room.wx, room.wy) < 0.02) { room.wx = 0; room.wy = 0; }
+      }
+      room.idle += rdt;
+      if (ROOM.turnBack > 0 && room.idle > ROOM.turnBack && !room.wx && !room.wy) {
+        let q = room.q;
+        if (q[0] < 0) q = q.map((v) => -v);                // the short way round
+        const f = 1 - Math.exp(-ROOM.turnBackSpeed * rdt);
+        room.q = qNorm([q[0] + (1 - q[0]) * f, q[1] * (1 - f), q[2] * (1 - f), q[3] * (1 - f)]);
+      }
+    }
     const p = room.p;
     if (room.mode === 'enter') return { sceneVis: 1 - ease(clamp((p - 0.4) / 0.25, 0, 1)), roomVis: ease(clamp((p - 0.6) / 0.4, 0, 1)) };
     if (room.mode === 'on') return { sceneVis: 0, roomVis: 1 };
