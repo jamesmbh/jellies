@@ -16,6 +16,7 @@
   const FONT = 'Consolas, "SF Mono", Menlo, "Courier New", monospace';
   const RAMP = ' .,:-~=+*o#%&@';
   const LEVELS = RAMP.length;
+  const STRAND = ".':|";   // thin characters for the deep-sea room's tentacles
 
   // Colours: the full hue wheel in 5° steps, plus three soft star colours.
   const HUE_STEP = 5;
@@ -86,18 +87,29 @@
     field = new Float32Array(cols * rows);
     owner = new Uint8Array(cols * rows);
 
-    buildAtlas();
+    ({ atlas, pad, gw, gh } = buildAtlas(fontSize, cellW, cellH));
+
+    // the deep-sea room has its own grid: characters half the size, so twice
+    // as many each way (see ROOM.detail)
+    {
+      const d = ROOM.detail, fcw = cellW / d, fch = cellH / d;
+      const fc = Math.ceil(w / fcw), fr = Math.ceil(h / fch);
+      fine = { cellW: fcw, cellH: fch, cols: fc, rows: fr, aspect: fcw / fch,
+               field: new Float32Array(fc * fr), owner: new Uint8Array(fc * fr), glyph: new Uint8Array(fc * fr), bg: null,
+               ...buildAtlas(fontSize / d, fcw, fch) };
+      cave = null; partMap = null; halo = null; acc = null;
+    }
     populate();
   }
 
   // Pre-render every glyph in every colour once, then blit from it.
-  function buildAtlas() {
-    pad = Math.ceil(fontSize * 0.6); // room for the glow
-    gw = Math.ceil((cellW + pad * 2) * dpr);
-    gh = Math.ceil((cellH + pad * 2) * dpr);
+  function buildAtlas(fontSize, cellW, cellH) {
+    const pad = Math.ceil(fontSize * 0.6); // room for the glow
+    const gw = Math.ceil((cellW + pad * 2) * dpr);
+    const gh = Math.ceil((cellH + pad * 2) * dpr);
 
-    atlas = document.createElement('canvas');
-    atlas.width = gw * LEVELS;
+    const atlas = document.createElement('canvas');
+    atlas.width = gw * (LEVELS + STRAND.length);
     atlas.height = gh * PALETTES.length;
     const a = atlas.getContext('2d');
     a.font = `${fontSize * dpr}px ${FONT}`;
@@ -117,7 +129,15 @@
         }
         a.fillText(RAMP[l], l * gw + gw / 2, p * gh + gh / 2);
       }
+      // thin strand characters (for tentacles), dim → bright
+      STRAND.split('').forEach((ch, i) => {
+        const t = 0.15 + (0.6 * i) / (STRAND.length - 1);
+        a.shadowBlur = 0;
+        a.fillStyle = `hsl(${hue}, ${sat}%, ${14 + 74 * Math.pow(t, 1.1)}%)`;
+        a.fillText(ch, (LEVELS + i) * gw + gw / 2, p * gh + gh / 2);
+      });
     });
+    return { atlas, pad, gw, gh };
   }
 
   // ================= drawing helpers =================
@@ -151,7 +171,7 @@
     if (countLit && I > LIT_MIN) litView++;
     if (countOnly) return;
     const k = r * cols + c;
-    I *= plotGain;
+    I *= plotGain * masterGain;
     if (I > field[k]) {
       field[k] = I;
       owner[k] = p;
@@ -551,8 +571,13 @@
   canvas.style.touchAction = 'none';
 
   canvas.addEventListener('pointerdown', (e) => {
+    if (room.mode !== 'none') {                           // in the cave: click the jellyfish
+      if (room.mode === 'on' && partAt(e.clientX, e.clientY)) room.alarm = 0;
+      return;
+    }
     if (focus.mode !== 'none' || scrollBusy()) return; // no dragging while zoomed / scrolling
     const [wx, wy] = toWorldPt(e);
+    if (hitPortal(wx, wy)) { enterRoom(); return; }      // the portal to the cave
     const hs = hitScenery(wx, wy);      // small things first: a polyp or baby jellyfish
     if (!hs && hitVent(wx, wy)) { tapVent(); return; } // the vent: build up pressure
     const j = hs ? null : hitTest(wx, wy, true);
@@ -597,7 +622,18 @@
 
   const grassPtr = { x: 0, t: 0 };
   canvas.addEventListener('pointermove', (e) => {
+    if (room.mode !== 'none') {                           // in the cave: hovering its parts
+      room.px = e.clientX; room.py = e.clientY;
+      room.hover = room.mode === 'on' ? partAt(e.clientX, e.clientY) : 0;
+      canvas.style.cursor = room.hover ? 'pointer' : 'default';
+      updateRoomTip();
+      return;
+    }
     const [wx, wy] = toWorldPt(e);
+    if (!drag.j && !drag.e && !drag.p && !pan.active && hitPortal(wx, wy)) {
+      portalHover = true; canvas.style.cursor = 'pointer'; return;
+    }
+    portalHover = false;
     if (drag.j || drag.e || drag.p) { drag.x = wx; drag.y = wy; return; }
     if (pan.active) {
       pan.dx = e.clientX - pan.x0; pan.dy = e.clientY - pan.y0;
@@ -1220,16 +1256,17 @@
   // zoom out: double-click anywhere (except on the panel, so its text can be
   // selected), the panel's × button, or Esc
   window.addEventListener('dblclick', (e) => {
-    if (focus.mode === 'on' && !(infoEl && infoEl.contains(e.target))) zoomOut();
+    if (room.mode === 'none' && focus.mode === 'on' && !(infoEl && infoEl.contains(e.target))) zoomOut();
   });
   window.addEventListener('keydown', (e) => {
+    if (room.mode !== 'none') { if (e.key === 'Escape') exitRoom(); return; }
     if (e.key === 'Escape') zoomOut();
     if (e.key === 'ArrowUp') moveScene(-1);
     if (e.key === 'ArrowDown') moveScene(1);
   });
 
   canvas.addEventListener('dblclick', (e) => {
-    if (focus.mode !== 'none' || scrollBusy()) return; // zooming / zoomed / scrolling
+    if (room.mode !== 'none' || focus.mode !== 'none' || scrollBusy()) return; // in the cave / zooming / scrolling
     const [wx, wy] = toWorldPt(e);
     const hs = hitScenery(wx, wy);                       // small things first: polyp / baby jellyfish
     if (hs) { drag.e = null; drag.p = null; startFocus(sceneryView(hs)); return; }
@@ -1969,6 +2006,10 @@
     const jitter = Math.sin(t * 55) * v.shake * 0.6;
     const hot = HOT_PAL();
 
+    // how charged the rock looks: the pressure you've built up — and while it's
+    // erupting it stays fully charged, fading only as the eruption dies down
+    const charge = v.erupting > 0 ? Math.max(v.pressure, Math.min(1, v.erupting / VENT.fall)) : v.pressure;
+
     // the chimney: rough rock, with cracks glowing hotter as pressure builds
     if (H > 1) {
       for (let y = 0; y < H; y += 1) {
@@ -1978,17 +2019,17 @@
           const n = hash(Math.round((dx + 20) * 3) + v.seed, Math.round(y));
           // the heat is in the top, where it erupts from: glowing cracks
           // spread down from the mouth as pressure builds — none near the base
-          const heat = v.pressure * Math.pow(k, 2.2);
+          const heat = charge * Math.pow(k, 2.2);
           const crack = heat > 0.02 && n > 1 - heat * 0.6;
           // and the rock just under the mouth warms up
-          const warm = v.pressure * clamp((k - 0.75) / 0.25, 0, 1);
+          const warm = charge * clamp((k - 0.75) / 0.25, 0, 1);
           if (crack) plot(v.x + dx + jitter, base - y, 0.4 + 0.55 * heat, hot);
           else if (warm > 0.15 && n > 0.4) plot(v.x + dx + jitter, base - y, 0.25 + 0.35 * warm, hot);
           else plot(v.x + dx + jitter, base - y, (edge ? 0.42 : 0.22) * (0.8 + 0.2 * n), ROCK_PAL);
         }
       }
       // the glowing mouth
-      const mouth = (0.55 + 0.25 * Math.sin(t * 6) + 0.3 * v.pressure) * (v.cool > 0 && !(v.erupting > 0) ? 0.55 : 1);
+      const mouth = (0.55 + 0.25 * Math.sin(t * 6) + 0.3 * charge) * (v.cool > 0 && !(v.erupting > 0) ? 0.55 : 1);
       blob(v.x + jitter, base - H, 1.1, Math.min(1, mouth), hot);
     }
 
@@ -2293,6 +2334,7 @@
   function drawSceneryFor(name, t, dt) {
     if (name === 'surface') { drawSurface(t); drawRain(t, dt); drawSparks(t, dt); }
     if (name === 'seabed') drawSeabed(t, dt);
+    if (name === 'openWater') drawPortal(t);
   }
 
   function drawEnvironment(t, dt) {
@@ -2985,6 +3027,903 @@
     },
   };
 
+
+  // ================= the deep-sea cave room (Atolla) =================
+  // A portal hangs in the open water. Click it and it swirls open and takes
+  // you to a dark sea cave with one huge Atolla jellyfish in the middle,
+  // gently pulsing and turning (not draggable). Hover over its parts to learn
+  // about them; click it to set off its blue "burglar alarm" light display.
+  // "Swim back out" (or Esc) returns you to the open water. The other scenes
+  // keep running while you're in here.
+
+  const ROOM = {
+    enter: 1.3,        // seconds for the portal to pull you in
+    exit: 1.0,         // seconds to swim back out
+    hue: 354,          // Atolla's deep crimson
+    // which way it's swimming (x right, y up, z toward you): nearly straight
+    // up (leaning slightly left) and a little away from the camera — a fairly side-on view, just
+    // seeing a bit of its underside (make the last number more negative to
+    // see more underneath)
+    axis: [-0.18, 0.95, -0.24],
+    spin: 0.06,        // how fast it slowly turns (radians per second)
+    // colour scheme: a warm body (crimson, with coral/orange and magenta/violet
+    // either side) lit by its complement — cyan to indigo light
+    hueSpread: 10,     // how far the body's colour wanders either side of crimson
+    tipHue: 340,       // tentacles fade toward this (deep rose-red) at their tips
+    tentBright: 10,    // how bright the tentacles are
+    tentThick: 1,      // how thick the tentacles are drawn (0 = one thin line)
+    backSide: 1.2,     // how much the far side of the bell shows through (1 = as bright as the near side)
+    outline: 0.9,      // how crisp the edges are (0 = soft; higher = more outlined)
+    rimBright: 3.5,    // how brightly the bell's rim glows (marks where the bell ends)
+    sag: 0.35,         // how much the tentacles droop under their own weight
+    tentLen: 1,        // rim tentacle length (× bell radius, roughly) — the long tentacle is set separately
+    tentSweep: 0.6,    // how far the tentacles sweep in toward the middle on each push
+    tentDelay: 0.9,    // seconds for the bell's squeeze to travel from a tentacle's root to its tip
+    tentFollow: 35,    // how firmly the tentacles hold their natural shape (lower = floppier, more lag)
+    tentDrag: 6,       // how much the water slows them (lower = they swing about more)
+    squeeze: 0.24,     // how much the rim pulls in on each beat (the dome barely changes)
+    surge: 0.1,        // how far each beat pushes it forward (× bell radius) before it glides back
+    tentWild: 1.1,     // how much the tentacles move about (0 = still)
+    detail: 1,         // the room's grid is this many times finer than the rest (2 = half-size characters; higher = slower)
+    // its light spills into the water around it, faintly colouring the
+    // nearby characters — a close glow and a wide, faint haze
+    glow: 0.75,        // strength of the close glow
+    glowR: 2,          // its reach (rows of the room's grid)
+    haze: 0.9,         // strength of the wide haze
+    hazeR: 14,         // its reach
+    glowMax: 0.32,     // the glow never gets brighter than this (keeps it faint)
+    // each beat also sends a faint wave of purple light rippling out across
+    // the whole screen, leaving a haze behind it
+    waveHue: 278,      // its colour (purple)
+    pulseGlow: 2.5,    // how strongly the pulses' light glows out into the water around them
+    pulseGlowR: 4,     // how far that glow reaches (rows)
+    pulseGlowMax: 0.5, // brightest that glow gets
+    waveBright: 0.26,  // how bright the wave front is
+    waveSpeed: 0.38,   // how fast it spreads (screen heights per second)
+    waveWidth: 0.07,   // how thick the wave front is (screen heights)
+    waveHaze: 0.45,    // how much glow it leaves behind it (0 = just the ring)
+    lightHue: 278,     // colour of its light — purple (the pulses, the alarm and the light organs; the body shifts toward it where light passes)
+    ringSpeed: 1.25,   // how fast each beat's ring of light travels down the body
+    ringReach: 3.2,    // how far down (bell = 1, beyond = tentacles) the rings travel
+    ringBright: 0.8,   // how bright the rings are
+    baseGlow: 0.3,     // its steady glow between rings (swells a little with each beat)
+    bellBright: 1,     // how much light the bell gives off (vs the tentacles)
+    exposure: 1,       // overall brightness (it sets itself; this nudges it)
+    wobble: 0.06,      // how much the view drifts about
+    glowChars: 0.35,   // how strongly the glow shows as faint characters in the water (0 = none)
+    bgGlow: 0.6,       // how strongly the glow tints the water behind the characters
+    bgBase: [3, 4, 14], // the water's own colour (dark navy; red, green, blue 0–255), darker toward the bottom
+    longTentacle: 6,   // length of the long tentacle (× bell radius) — real ones reach 1.5–36× the bell's width
+    alarm: 3.2,        // seconds the light display lasts
+  };
+  const room = { mode: 'none', p: 0, hover: 0, alarm: -1, px: -1, py: -1 };
+  let masterGain = 1;  // whole-picture brightness (fades scenes / the room in and out)
+  let partMap = null;  // which part of the Atolla each cell shows (for hovering)
+  let curPart = 0;
+
+  // ----- the portal (open-water scenery) -----
+  const portal = () => ({ x: worldW() * 0.86, y: rows * 0.42, R: rows * 0.085 });
+  let portalHover = false;
+
+  function hitPortal(wx, wy) {
+    if (scene !== 'openWater' || room.mode !== 'none' || focus.mode !== 'none' || scrollBusy()) return false;
+    const P = portal();
+    return Math.hypot((wx - P.x) / P.R, (wy - P.y) / P.R) < 1.25;
+  }
+
+  function drawPortal(t) {
+    const P = portal();
+    // grows and spins up while it pulls you in
+    const pull = room.mode === 'enter' ? ease(Math.min(1, room.p / 0.55)) : 0;
+    const R = P.R * (1 + pull * 9), spinF = 1 + pull * 6;
+    const glow = (portalHover ? 1.25 : 1) * (0.85 + 0.15 * Math.sin(t * 2.2));
+    const n = Math.ceil((Math.PI * 2 * R) / 0.5);
+    for (let i = 0; i < n; i++) {
+      const th = (i / n) * Math.PI * 2;
+      // outer ring, crimson, turning one way
+      const a1 = th + t * 0.5 * spinF;
+      const w1 = 0.6 + 0.4 * Math.sin(th * 7 - t * 3 * spinF);
+      plot(P.x + Math.cos(a1) * R, P.y + Math.sin(a1) * R, 0.55 * w1 * glow, hueIdx(354));
+      // inner ring, violet-blue, the other way
+      const a2 = th - t * 0.8 * spinF, r2 = R * 0.78;
+      if (i % 2 === 0) plot(P.x + Math.cos(a2) * r2, P.y + Math.sin(a2) * r2, 0.35 * (0.6 + 0.4 * Math.sin(th * 5 + t * 4)) * glow, hueIdx(255));
+    }
+    // a faint swirl spiralling into the dark middle, with blue sparks
+    for (let arm = 0; arm < 3; arm++) {
+      for (let k = 0; k < 1; k += 0.03) {
+        const a = arm * 2.094 + k * 5 - t * 1.4 * spinF, r = R * 0.7 * (1 - k);
+        plot(P.x + Math.cos(a) * r, P.y + Math.sin(a) * r, 0.22 * (1 - k * 0.6) * glow, hueIdx(280 - 60 * k));
+      }
+    }
+    for (let i = 0; i < 6; i++) {
+      const a = t * 1.3 + i * 1.7, r = R * (0.3 + 0.6 * ((t * 0.37 + i * 0.19) % 1));
+      plot(P.x + Math.cos(a) * r, P.y + Math.sin(a) * r, 0.7 * glow, hueIdx(205));
+    }
+  }
+
+  // ----- the cave: rock walls, stalactites, floor, glowing patches, snow -----
+  let cave = null;
+  const nz = (x, seeds) => seeds.reduce((a, [f, p, amp]) => a + Math.sin(x * f + p) * amp, 0);
+
+  function makeCave() {
+    const W = worldW(), seed = () => [rand(0.03, 0.2), rand(0, 6.28), rand(0.3, 1)];
+    cave = {
+      wl: [seed(), seed(), seed()], wr: [seed(), seed(), seed()],
+      ce: [seed(), seed(), seed()], fl: [seed(), seed(), seed()],
+      tites: Array.from({ length: Math.round(W / 14) }, () => ({ x: rand(W * 0.1, W * 0.9), len: rows * rand(0.04, 0.16), w: rand(1.5, 4) })),
+      mites: Array.from({ length: Math.round(W / 22) }, () => ({ x: rand(W * 0.05, W * 0.95), len: rows * rand(0.03, 0.09), w: rand(2, 5) })),
+      glow: [], snow: Array.from({ length: Math.round(cols * rows / 140) }, () => ({ x: rand(0, W), y: rand(0, rows), z: Math.random(), ph: rand(0, 6.28) })),
+    };
+    // clusters of faintly glowing specks on the rock near its edge
+    for (let c = 0; c < 9; c++) {
+      const side = c % 3, along = Math.random();
+      for (let i = 0; i < 14; i++) {
+        let x, y;
+        if (side === 0) { y = rows * (0.2 + 0.65 * along) + rand(-3, 3); x = caveLeft(y) - rand(0.5, 4); }
+        else if (side === 1) { y = rows * (0.2 + 0.65 * along) + rand(-3, 3); x = caveRight(y) + rand(0.5, 4); }
+        else { x = W * (0.15 + 0.7 * along) + rand(-4, 4); y = caveTop(x) - rand(0.5, 3); }
+        cave.glow.push({ x, y, ph: rand(0, 6.28), f: rand(0.4, 1.2), hue: rand(165, 200) });
+      }
+    }
+  }
+  const caveLeft = (y) => worldW() * 0.07 + nz(y, cave.wl) * 3 + Math.max(0, rows * 0.28 - y) * 0.55;
+  const caveRight = (y) => worldW() * 0.93 + nz(y, cave.wr) * 3 - Math.max(0, rows * 0.28 - y) * 0.55;
+  function caveTop(x) {
+    let y = rows * 0.07 + nz(x, cave.ce) * 2;
+    for (const s of cave.tites) y += s.len * Math.pow(Math.max(0, 1 - Math.abs(x - s.x) / s.w), 1.6);
+    return y;
+  }
+  function caveFloor(x) {
+    let y = rows * 0.94 + nz(x, cave.fl) * 1.5;
+    for (const s of cave.mites) y -= s.len * Math.pow(Math.max(0, 1 - Math.abs(x - s.x) / s.w), 1.4);
+    return y;
+  }
+
+  function drawCave(t, rdt) {
+    const W = worldW();
+    // (cave walls are switched off for now — just dark water and marine snow;
+    // caveLeft / caveRight / caveTop / caveFloor still describe them)
+    for (const f of cave.snow) {
+      f.y += (0.1 + f.z * 0.4) * rdt * TIME_SCALE;
+      f.x += Math.sin(t * 0.3 + f.ph) * 0.04 * rdt;
+      if (f.y > rows) { f.y = 0; f.x = rand(0, W); }
+      if (f.z > 0.65) {                                   // some are glowing motes, twinkling blue
+        const tw = Math.pow(0.5 + 0.5 * Math.sin(t * (0.8 + f.ph % 1) + f.ph * 7), 2);
+        const pick = (f.ph * 7.31) % 1;
+        const mh = pick < 0.6 ? 185 + 45 * ((f.ph * 3) % 1) : pick < 0.8 ? 290 + 40 * ((f.ph * 5) % 1) : 38;
+        plot(f.x, f.y, 0.12 + 0.4 * tw, hueIdx(mh));
+      } else plot(f.x, f.y, 0.05 + 0.15 * f.z * f.z, SNOW_PAL);
+    }
+  }
+
+  // ----- the Atolla -----
+  // parts you can hover over, with what to say about them
+  const PARTS = {
+    1: { name: 'Dome', text: 'The raised centre of the bell — thick, clear jelly (mesoglea) that is mostly water and gives the body its shape.' },
+    2: { name: 'Crown groove', text: 'A deep groove running all the way around the bell. It gives crown jellyfish (order Coronatae) their name.' },
+    3: { name: 'Pedalia', text: 'Below the groove the bell is split into thick segments. Each carries either a tentacle or a sense organ — they alternate all the way round.' },
+    4: { name: 'Lappets', text: 'The scalloped flaps around the rim. Each pulse of the bell squeezes water out past them to push the jellyfish along.' },
+    5: { name: 'Sense organs', text: 'About 22 rhopalia, alternating with the tentacles. They sense balance and light, so it can tell which way is up in total darkness.' },
+    6: { name: 'Tentacles', text: 'Usually about 22 tentacles around the rim (anywhere from 20 to 36), packed with stinging cells — for catching prey and fending off attackers.' },
+    7: { name: 'The long tentacle', text: 'A different kind of tentacle: it grows from underneath, near the mouth, and can stretch 1.5 to over 30 times the bell\'s width, coiling and retracting. It has few stinging cells — it may collect tiny food like flypaper, and Atolla have been seen holding on to each other with it when mating.' },
+    8: { name: 'Red stomach', text: 'Much of its prey glows. Scientists think the deep red stomach hides that light, so a meal doesn\'t give the jellyfish away to predators.' },
+    9: { name: 'Light organs', text: 'Atolla makes its own blue light. When attacked it flashes a spinning ring of light — a "burglar alarm" that may draw in a bigger predator to go after the attacker. Click it to see.' },
+  };
+
+  // ---- additive light (the look of a glowing jellyfish) ----
+  // Every point of the Atolla *adds* its light to the cells it lands on (split
+  // between the 4 nearest, so it's smooth), instead of the brightest one
+  // winning. Where it's folded or seen edge-on more points pile up and it glows
+  // brighter, like real see-through jelly. The total is then squashed into
+  // 0..1 by an exposure curve (see toneRoom). Body light and its own purple
+  // light are kept as a colour mix, and tentacle light separately (they're
+  // drawn with thin strand characters).
+  let acc = null;
+  const PCOS = PALETTES.map(([h]) => Math.cos((h * Math.PI) / 180)), PSIN = PALETTES.map(([h]) => Math.sin((h * Math.PI) / 180));
+  function splat(x, y, eB, pal, eL, part) {
+    if (room.hover) { const m = part === room.hover ? 1.5 : 0.4; eB *= m; eL *= m; }  // hovered part lights up, the rest dims
+    const fc = x / aspect, fr = y;
+    const c0 = Math.floor(fc), r0 = Math.floor(fr);
+    if (!(c0 >= -1 && c0 < cols && r0 >= -1 && r0 < rows)) return;
+    const fx = fc - c0, fy = fr - r0, e = eB + eL;
+    const T = part === 6 || part === 7 ? acc.S : acc.T;
+    const lh = (ROOM.lightHue * Math.PI) / 180;
+    const hc = PCOS[pal] * eB + Math.cos(lh) * eL, hs = PSIN[pal] * eB + Math.sin(lh) * eL;
+    for (let j = 0; j < 4; j++) {
+      const r = r0 + (j >> 1), c = c0 + (j & 1);
+      if (r < 0 || r >= rows || c < 0 || c >= cols) continue;
+      const w = ((j & 1) ? fx : 1 - fx) * ((j >> 1) ? fy : 1 - fy);
+      const k = r * cols + c, we = e * w;
+      T[k] += we; acc.C[k] += hc * w; acc.N[k] += hs * w;
+      if (we > acc.pw[k]) { acc.pw[k] = we; partMap[k] = part; }
+    }
+  }
+
+  // turn the added-up light into the grid's brightness, colour and characters
+  const STRAND_N = 4;   // strand characters .':| (in the glyph atlas after the RAMP ones)
+  function toneRoom() {
+    const n = cols * rows, T = acc.T, S = acc.S;
+    // exposure: set so the brightest ~0.7% of lit cells reach the top of the
+    // ramp, re-checked now and then and eased toward
+    if (acc.cal-- <= 0) {
+      let m = 0; const tmp = acc.tmp;
+      for (let k = 0; k < n; k++) { const v = T[k] + S[k]; if (v > 0) tmp[m++] = v; }
+      if (m > 20) {
+        const arr = tmp.subarray(0, m).sort();
+        const target = 3 / arr[Math.floor(m * 0.993)];
+        acc.expo = acc.expo ? acc.expo + (target - acc.expo) * 0.25 : target;
+      }
+      acc.cal = 20;
+    }
+    const ex = acc.expo * ROOM.exposure, g = masterGain, glyph = fine.glyph;
+    glyph.fill(0);
+    // Outlines: each cell is compared with the 8 around it, and the
+    // difference is exaggerated — so edges (of the bell, of each tentacle)
+    // come out crisp and bright against darker surroundings.
+    const L0 = acc.tmp, ol = ROOM.outline;
+    for (let k = 0; k < n; k++) { const tot = T[k] + S[k]; L0[k] = tot > 0 ? 1 - Math.exp(-tot * ex) : 0; }
+    for (let k = 0; k < n; k++) {
+      const tot = T[k] + S[k];
+      if (!(tot > 0)) continue;
+      let I = L0[k];
+      if (ol > 0) {
+        const r = (k / cols) | 0, c = k - r * cols;
+        let sum = 0, cnt = 0;
+        for (let dr = -1; dr <= 1; dr++) {
+          const rr = r + dr; if (rr < 0 || rr >= rows) continue;
+          for (let dc = -1; dc <= 1; dc++) { const cc = c + dc; if ((dr || dc) && cc >= 0 && cc < cols) { sum += L0[rr * cols + cc]; cnt++; } }
+        }
+        I = clamp(I + ol * (I - sum / cnt), 0, 1);
+      }
+      const v = I * g;
+      if (v < LIT_MIN || v <= field[k]) continue;
+      field[k] = v;
+      owner[k] = hueIdx((Math.atan2(acc.N[k], acc.C[k]) * 180) / Math.PI);
+      if (S[k] > 1.3 * T[k] && I < 0.75) {               // mostly tentacle → a strand character
+        const si = Math.round((I - 0.06) * STRAND_N * 1.7);
+        glyph[k] = si <= 0 ? 255 : LEVELS + Math.min(STRAND_N, si) - 1;
+      }
+    }
+  }
+
+  // bell profile, s: 0 at the top of the dome → 1 at the rim → [radius, height]
+  function atollaProf(s) {
+    if (s < 0.42) { const q = s / 0.42; return [0.52 * q, 0.12 + 0.42 * (1 - q * q)]; }     // dome
+    if (s < 0.5) { const q = (s - 0.42) / 0.08; return [0.52 + 0.06 * q, 0.12 - 0.08 * Math.sin(Math.PI * q)]; } // groove
+    if (s < 0.85) { const q = (s - 0.5) / 0.35; return [0.58 + 0.34 * q, 0.12 - 0.17 * q]; } // pedalia
+    const q = (s - 0.85) / 0.15; return [0.92 + 0.08 * q, -0.05 - 0.12 * q];                 // lappets
+  }
+  const partOfS = (s) => (s < 0.42 ? 1 : s < 0.5 ? 2 : s < 0.85 ? 3 : 4);
+
+  // a smooth, never-quite-repeating wobble (-1 … 1): three sines at
+  // unrelated speeds, with phases p
+  const wander = (x, p) => 0.5 * Math.sin(x + p[0]) + 0.3 * Math.sin(x * 1.73 + p[1]) + 0.2 * Math.sin(x * 2.91 + p[2]);
+  let tents = null;   // each rim tentacle's own length and way of moving
+  let longCh = null;  // the long tentacle's chain
+
+  // One step of a tentacle chain. ch.p / ch.q: each link's position now and
+  // a moment ago (so its speed is the difference). tgt: where its natural
+  // shape would put each link; the root (link 0) is pinned there. follow: how
+  // strongly the links are pulled toward it (strongest at the root); drag:
+  // how much the water slows them. Then each link is put back at its set
+  // length from the one before, so the tentacle never stretches.
+  function stepChain(ch, tgt, n, dt, follow, drag) {
+    // its length: the natural shape's length, averaged over a couple of
+    // seconds (so it doesn't stretch with each beat)
+    let Lt = 0;
+    for (let j = 1; j < n; j++) { const o = j * 3; Lt += Math.hypot(tgt[o] - tgt[o - 3], tgt[o + 1] - tgt[o - 2], tgt[o + 2] - tgt[o - 1]); }
+    ch.len = ch.len ? ch.len + (Lt - ch.len) * Math.min(1, dt * 0.5) : Lt;
+    const seg = ch.len / (n - 1);
+    if (!ch.init) { ch.p.set(tgt); ch.q.set(tgt); ch.init = true; return; }
+    const sub = 3, h = dt / sub, keep = Math.max(0, 1 - drag * h);
+    const P = ch.p, Q = ch.q;
+    for (let it = 0; it < sub; it++) {
+      for (let c = 0; c < 3; c++) { P[c] = tgt[c]; Q[c] = tgt[c]; }
+      for (let j = 1; j < n; j++) {
+        const kS = follow * (1 - 0.85 * (j / (n - 1)));
+        for (let c = 0; c < 3; c++) {
+          const o = j * 3 + c, p = P[o];
+          const v = (p - Q[o]) * keep, acc = (tgt[o] - p) * kS;
+          Q[o] = p; P[o] = p + v + acc * h * h;
+        }
+      }
+      for (let j = 1; j < n; j++) {
+        const o = j * 3, m = o - 3;
+        const rest = seg;
+        const dx = P[o] - P[m], dy = P[o + 1] - P[m + 1], dz = P[o + 2] - P[m + 2];
+        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (d > 1e-6) {
+          // move the link back to its length — and its "moment ago" with it,
+          // so the fix doesn't give it a kick (that made them flick about)
+          const f = rest / d;
+          const nx = P[m] + dx * f, ny = P[m + 1] + dy * f, nz = P[m + 2] + dz * f;
+          Q[o] += nx - P[o]; Q[o + 1] += ny - P[o + 1]; Q[o + 2] += nz - P[o + 2];
+          P[o] = nx; P[o + 1] = ny; P[o + 2] = nz;
+        }
+      }
+    }
+  }
+  const LONG_A = [0.4, 2.1, 4.4], LONG_B = [1.7, 5.2, 0.9];
+
+  function drawAtolla(t) {
+    const W = worldW();
+    const Rb = Math.min(W * 0.17, rows * 0.3);            // bell radius (the tentacles make up the length)
+    const beatLen = 1 / ROOM.pulseF;
+    // the beat: a quick squeeze, then a slow refill (0 relaxed … 1 squeezed)
+    const pulseAt = (tt) => {
+      const ph = (((tt % beatLen) + beatLen) % beatLen) / beatLen;
+      const v = Math.sin(Math.PI * Math.pow(Math.min(1, ph / 0.42), 0.7));
+      return v * v;
+    };
+    const c = pulseAt(t - 0.25);                          // (at the rim)
+    // Each squeeze pushes water out of the bell, so it surges forward, then
+    // glides and drifts back while the bell slowly refills — overall it
+    // stays in place. fwd: how far forward it is (0 … 1).
+    const surgeAt = (tt) => {
+      const ph = (((tt % beatLen) + beatLen) % beatLen) / beatLen;
+      if (ph < 0.2) { const q = ph / 0.2; return 1 - (1 - q) * (1 - q); }              // the push: while the bell squeezes
+      const q = (ph - 0.2) / 0.8; return 1 - q * q * (3 - 2 * q);                       // slow glide back while it refills
+    };
+    const fwd = surgeAt(t - 0.25);                         // (in step with the rim's squeeze)
+    const cx0 = W * 0.4, cy0 = rows * 0.3;
+    const spin = t * ROOM.spin;
+
+    // its own frame: a = the way it swims, e1 / e2 = across the bell. The
+    // view drifts slightly, as if you're bobbing in the water with it.
+    const vn = (v) => { const l = Math.hypot(v[0], v[1], v[2]); return [v[0] / l, v[1] / l, v[2] / l]; };
+    const vx = (p, q) => [p[1] * q[2] - p[2] * q[1], p[2] * q[0] - p[0] * q[2], p[0] * q[1] - p[1] * q[0]];
+    const A0 = ROOM.axis, wob = ROOM.wobble;
+    const ax = vn([A0[0] + wob * Math.sin(t * 0.23), A0[1] + wob * 0.6 * Math.sin(t * 0.31 + 1), A0[2] + wob * Math.sin(t * 0.17 + 2)]);
+    const e1 = vn(vx([0, 0, 1], ax)), e2 = vx(ax, e1);
+    const e10 = e1[0], e11 = e1[1], e12 = e1[2], a0 = ax[0], a1 = ax[1], a2 = ax[2], e20 = e2[0], e21 = e2[1], e22 = e2[2];
+    // it moves along the way it's facing
+    const push = ROOM.surge * Rb * fwd;
+    const cx = cx0 + a0 * push, cy = cy0 - a1 * push;
+    // "down" (on screen) in its own coords — for the tentacles' droop
+    const gX = -e11, gY = -a1, gZ = -e21;
+    // 3D (its own coords) → screen; returns [x, y, depth]
+    room.cx = cx; room.cy = cy; room.Rb = Rb;             // (for the light waves)
+    const proj = (X, Y, Z) => [cx + (X * e10 + Y * a0 + Z * e20) * Rb, cy - (X * e11 + Y * a1 + Z * e21) * Rb, X * e12 + Y * a2 + Z * e22];
+    const LAPS = 44;                                      // ~44 lappets in Atolla wyvillei
+    const alarmOn = room.alarm >= 0 && room.alarm < ROOM.alarm;
+    const alarmFade = alarmOn ? Math.min(1, room.alarm * 4, (ROOM.alarm - room.alarm) * 1.5) : 0;
+
+    // Its light. The body only shows by the light it makes: a soft glow that
+    // swells with each beat, plus a ring of light that every beat sends from
+    // the top of the dome down to the tentacle tips. u is how far down the
+    // body: 0 = top of the dome, 1 = the rim, beyond = along the tentacles.
+    const nowBeat = Math.floor(t / beatLen);
+    const base = ROOM.baseGlow * (0.7 + 0.6 * pulseAt(t));
+    const ringAt = (u) => {
+      let L = 0;
+      for (let b = 0; b < 4; b++) {
+        const w = (t - (nowBeat - b) * beatLen) * ROOM.ringSpeed;
+        if (w <= 0 || w > ROOM.ringReach) continue;
+        const d = (u - w) / 0.12;
+        L += Math.exp(-0.35 * w) * Math.exp(-d * d);
+      }
+      return L * ROOM.ringBright;
+    };
+
+    // --- bell surface ---
+    // (about two points per character: rings near the top of the dome are
+    // small, so they skip points — see stride — and count for more)
+    const nT = Math.max(120, Math.min(2600, Math.round((Math.PI * 2 * Rb) / aspect / 0.7)));
+    const nS = Math.max(40, Math.round((1.3 * Rb) / 0.6));
+    // everything that only depends on the angle round the bell, worked out once
+    const cosA = new Float32Array(nT), sinA = new Float32Array(nT), lapA = new Float32Array(nT), thA = new Float32Array(nT);
+    const sin1 = new Float32Array(nT), cos1 = new Float32Array(nT), sin3 = new Float32Array(nT), cos3 = new Float32Array(nT);
+    const sin22 = new Float32Array(nT), cos22 = new Float32Array(nT), ridge8 = new Float32Array(nT), ridge30 = new Float32Array(nT);
+    const bulgeA = new Float32Array(nT), lapMid = new Float32Array(nT), gonA = new Float32Array(nT);
+    for (let i = 0; i < nT; i++) {
+      const th = (i / nT) * Math.PI * 2;
+      thA[i] = th; cosA[i] = Math.cos(th + spin); sinA[i] = Math.sin(th + spin);
+      lapA[i] = ((th * LAPS) / (Math.PI * 2)) % 1;          // 0..1 across each lappet
+      sin1[i] = Math.sin(th); cos1[i] = Math.cos(th); sin3[i] = Math.sin(3 * th); cos3[i] = Math.cos(3 * th);
+      sin22[i] = Math.sin(22 * th); cos22[i] = Math.cos(22 * th);
+      const rc = Math.abs(Math.cos(th * LAPS / 2));
+      ridge8[i] = Math.pow(rc, 8); ridge30[i] = Math.pow(rc, 30);
+      bulgeA[i] = Math.pow(Math.sin(Math.PI * lapA[i]), 0.7); lapMid[i] = gauss(lapA[i] - 0.5, 0.25);
+      const gq = ((th * 8) / (Math.PI * 2)) % 1;           // 8 gonads round the bell
+      gonA[i] = gauss(gq - 0.5, 0.22);
+    }
+    const spread = ROOM.hueSpread;
+    for (let si = 0; si <= nS; si++) {
+      const s = si / nS;
+      // the squeeze ripples from the top of the dome out to the rim
+      const cs = pulseAt(t - 0.25 * s), fl = s * s;          // fl: how much this ring flexes (rim most)
+      const sr = 1 - ROOM.squeeze * cs * fl, sh = 1 + 0.06 * cs * (1 - s), dropS = 0.12 * cs * fl * s;
+      const [r0, h0] = atollaProf(s), [r1, h1] = atollaProf(Math.min(1, s + 1 / nS)), [rm, hm] = atollaProf(Math.max(0, s - 1 / nS));
+      const dr = r1 - rm, dh = h1 - hm, nl = Math.hypot(dr, dh) || 1, nr = -dh / nl, nh = dr / nl;
+      const part = partOfS(s);
+      const lq = part === 4 ? (s - 0.85) / 0.15 : 0;
+      const stride = Math.max(1, Math.floor(0.9 / Math.max(0.05, r0)));
+      const ringS = ringAt(s), rim = gauss(s - 1, 0.035), gonS = gauss(s - 0.47, 0.06);
+      const top = 0.45 + 1.2 * (1 - s) * (1 - s);           // the thick top of the dome holds more light
+      // the colour waves and stripes, split into angle × (this ring) parts
+      const p1 = s * 2.5 - t * 0.25, p3 = -s * 1.7 + t * 0.17, p22 = s * 3;
+      const cp1 = Math.cos(p1), sp1 = Math.sin(p1), cp3 = Math.cos(p3), sp3 = Math.sin(p3), cp22 = Math.cos(p22), sp22 = Math.sin(p22);
+      const wS = stride * ROOM.bellBright;
+      for (let i = 0; i < nT; i += stride) {
+        let r = r0, h = h0;
+        if (part === 3) h += 0.025 * ridge8[i];             // ridged segments
+        if (part === 4) { const bulge = bulgeA[i]; r += 0.06 * lq * bulge; h -= 0.04 * lq * bulge; }
+        // the margin flutters a little
+        r *= sr * (1 + 0.03 * s * s * s * Math.sin(14 * thA[i] - 2 * t));
+        h = h * sh - dropS;                                // the rim also folds down as it squeezes
+        const X = r * cosA[i], Y = h, Z = r * sinA[i];
+        const x = cx + (X * e10 + Y * a0 + Z * e20) * Rb, y = cy - (X * e11 + Y * a1 + Z * e21) * Rb, dz = X * e12 + Y * a2 + Z * e22;
+        // seen edge-on, see-through jelly glows brighter (up to 3×)
+        const Nx = nr * cosA[i], Nz = nr * sinA[i];
+        const ndv = Math.abs(Nx * e12 + nh * a2 + Nz * e22), fres = 1 - ndv;
+        const edge = Math.min(3, 1 / Math.max(ndv, 0.33));
+        const back = dz < 0 ? ROOM.backSide : 1;
+        // fine stripes running down the bell, like brushed glass
+        const sv = sin22[i] * cp22 + cos22[i] * sp22, sv2 = sv * sv, stripe = sv2 * sv2 * sv2;
+        const dw = ((sin1[i] * cp1 + cos1[i] * sp1) * 0.65 + (sin3[i] * cp3 + cos3[i] * sp3) * 0.35) * spread;
+        // how much light this bit of tissue gives off, and its colour
+        let alb, hue;
+        if (part === 1) { alb = top * (0.85 + 0.4 * stripe); hue = 2 + dw - 6 * fres; }
+        else if (part === 2) { alb = 1.1 + 1.4 * gonA[i] * gonS; hue = 8 + dw * 0.4; }
+        else if (part === 3) { alb = (0.5 + 0.5 * ridge30[i] + 0.2 * stripe) + 1.4 * gonA[i] * gonS; hue = -2 + dw - 5 * fres; }
+        else { alb = 0.55 + ROOM.rimBright * rim + 0.25 * lapMid[i] * lq; hue = -6 + dw + 10 * rim; }
+        const e = alb * edge * back * wS;
+        splat(x, y, e * base, hueIdx(ROOM.hue + hue), e * ringS, part);
+        pulseAdd(x, y, ringS * back);
+        // the alarm: light racing round the rim in a pinwheel
+        if (alarmOn && part >= 3 && s > 0.7) {
+          let A = 0;
+          for (let arm = 0; arm < 3; arm++) {
+            let d = (thA[i] - room.alarm * 5.5 - (arm * Math.PI * 2) / 3) % (Math.PI * 2);
+            if (d < 0) d += Math.PI * 2;
+            A = Math.max(A, Math.exp(-Math.pow(Math.min(d, Math.PI * 2 - d) / 0.35, 2)));
+          }
+          if (A > 0.05) { splat(x, y, 0, 0, 2.2 * A * alarmFade * back * wS, 9); pulseAdd(x, y, A * alarmFade * back); }
+        }
+      }
+    }
+
+    // --- the red stomach, seen through the dome ---
+    {
+      const cs = pulseAt(t - 0.1), sr = 1 - 0.03 * cs, sh = 1 + 0.03 * cs, ringM = ringAt(0.35);
+      for (let i = 0; i < nT; i += 2) {
+        for (let v = -0.9; v <= 0.9; v += 0.15) {
+          const ring = Math.sqrt(1 - v * v);
+          const [x, y, dz] = proj(0.3 * ring * cosA[i] * sr, (0.2 + 0.1 * v) * sh, 0.3 * ring * sinA[i] * sr);
+          const e = ROOM.bellBright * 3 * (0.8 + 0.4 * (1 - Math.abs(v))) * (dz < 0 ? 0.8 : 1);
+          splat(x, y, e * base, hueIdx(350 + 8 * (1 - Math.abs(v))), e * ringM * 0.6, 8);
+          pulseAdd(x, y, ringM * 0.6);
+        }
+      }
+    }
+
+    // --- 22 tentacles, in every other notch between the lappets ---
+    if (!tents) tents = Array.from({ length: LAPS / 2 }, () => ({
+      len: rand(0.85, 1.3), flare: rand(-1, 1), f: rand(0.5, 1.1),
+      a: [rand(0, 6.3), rand(0, 6.3), rand(0, 6.3)], b: [rand(0, 6.3), rand(0, 6.3), rand(0, 6.3)],
+      cu: [rand(0, 6.3), rand(0, 6.3), rand(0, 6.3)], l: [rand(0, 6.3), rand(0, 6.3), rand(0, 6.3)],
+    }));
+    const srR = 1 - ROOM.squeeze * c, shR = 1, dropR = 0.12 * c;
+    // a tentacle point, drawn a little thick so it's easy to see
+    const tentSplat = (x, y, eB, pal, eL, part, k) => {
+      const th = ROOM.tentThick * (1 - 0.5 * k);
+      if (th <= 0) { splat(x, y, eB, pal, eL, part); return; }
+      const ox = 0.55 * th * aspect, oy = 0.45 * th, sw = 0.25;
+      splat(x, y, eB * 1.4, pal, eL * 1.4, part);
+      splat(x - ox, y, eB * sw, pal, eL * sw, part); splat(x + ox, y, eB * sw, pal, eL * sw, part);
+      splat(x, y - oy, eB * sw, pal, eL * sw, part); splat(x, y + oy, eB * sw, pal, eL * sw, part);
+    };
+    // Each tentacle is a chain of links that can't stretch, pinned to the rim
+    // at its root. Every link has weight and is slowed by the water, and is
+    // gently pulled toward where the tentacle's natural, swaying shape would
+    // put it — firmly near the root, loosely at the tip. So when the bell
+    // squeezes and surges, the movement flows down each tentacle on its own.
+    // (Worked out in "world" units of one bell radius, then drawn.)
+    const pu = ROOM.surge * fwd;                          // how far forward it has pushed
+    const toWld = (X, Y, Z, out, o) => {
+      out[o] = X * e10 + Y * a0 + Z * e20 + a0 * pu;
+      out[o + 1] = X * e11 + Y * a1 + Z * e21 + a1 * pu;
+      out[o + 2] = X * e12 + Y * a2 + Z * e22 + a2 * pu;
+    };
+    const simDt = clamp(t - (room.simT == null ? t : room.simT), 0, 0.05);
+    const NODES = 14;
+    const tgt = new Float32Array(NODES * 3);
+    // draw a tentacle along its chain (smoothly curved between the links)
+    const drawChain = (ch, n, Ltot, steps, look) => {
+      const P = ch.p;
+      for (let i = 0; i <= steps; i++) {
+        const k = i / steps, seg = k * (n - 1), j = Math.min(n - 2, Math.floor(seg)), u = seg - j;
+        const j0 = Math.max(0, j - 1), j3 = Math.min(n - 1, j + 2);
+        const u2 = u * u, u3 = u2 * u;
+        const w0 = -0.5 * u3 + u2 - 0.5 * u, w1 = 1.5 * u3 - 2.5 * u2 + 1, w2 = -1.5 * u3 + 2 * u2 + 0.5 * u, w3 = 0.5 * u3 - 0.5 * u2;
+        const X = w0 * P[j0 * 3] + w1 * P[j * 3] + w2 * P[j * 3 + 3] + w3 * P[j3 * 3];
+        const Y = w0 * P[j0 * 3 + 1] + w1 * P[j * 3 + 1] + w2 * P[j * 3 + 4] + w3 * P[j3 * 3 + 1];
+        const Z = w0 * P[j0 * 3 + 2] + w1 * P[j * 3 + 2] + w2 * P[j * 3 + 5] + w3 * P[j3 * 3 + 2];
+        look(cx0 + X * Rb, cy0 - Y * Rb, Z, k);
+      }
+    };
+
+    for (let tI = 0; tI < LAPS / 2; tI++) {
+      const g = tI * 2, tn = tents[tI];
+      const th = (g / LAPS) * Math.PI * 2 + spin;           // in the notch between two lappets
+      const ca = Math.cos(th), sa = Math.sin(th);
+      const L = tn.len * ROOM.tentLen;
+      const wild = ROOM.tentWild;
+      // its natural shape right now, at each link
+      for (let j = 0; j < NODES; j++) {
+        const k = j / (NODES - 1);
+        // the bell's squeeze reaches each bit a moment after the root
+        const dk = ROOM.tentDelay * k;
+        const cl = pulseAt(t - 0.25 - dk);
+        const rootR = 0.96 * (1 - ROOM.squeeze * cl), rootDrop = 0.12 * cl;
+        // they leave the rim angled slightly outward, then hang loose…
+        const out = (0.16 + 0.06 * tn.flare) * (1 - Math.exp(-k * 7)) - 0.08 * k;
+        // …and drift about on their own, each with its own speeds
+        const tk = t - k * 1.6, amp = wild * Math.pow(k, 1.2) * Math.min(1, L / 1.6);   // (shorter ones swing less)
+        const side = amp * (0.32 * wander(tk * tn.f, tn.a) + 0.1 * Math.sin(k * 7 - t * 1.3 + tn.a[0]));
+        const outw = amp * 0.22 * wander(tk * tn.f * 0.8, tn.b);
+        // as the bell squeezes and pushes, they sweep in toward the middle
+        // (from the root down, as the squeeze travels along them), then drift
+        // back out while it refills
+        const sweep = ROOM.tentSweep * cl * Math.pow(k, 0.7);
+        const curl = wild * 0.25 * Math.pow(k, 3) * wander(t * 0.25, tn.cu);   // the tips curl and uncurl
+        const rr = Math.max(0.05, rootR + out + outw - sweep);
+        const Y = -0.16 - rootDrop - L * k * 0.85 + amp * 0.12 * wander(tk * tn.f * 1.3, tn.l);
+        toWld(rr * ca - (side + curl) * sa, Y, rr * sa + (side + curl) * ca, tgt, j * 3);
+        tgt[j * 3 + 1] -= ROOM.sag * Math.pow(k, 1.6) * L;  // drooping under its own weight
+      }
+      if (!tn.ch) tn.ch = { p: new Float32Array(NODES * 3), q: new Float32Array(NODES * 3), init: false };
+      stepChain(tn.ch, tgt, NODES, simDt, ROOM.tentFollow, ROOM.tentDrag);
+      const steps = Math.ceil((L * Rb) / 0.35);
+      drawChain(tn.ch, NODES, L, steps, (x, y, dz, k) => {
+        const root = Math.min(1, 0.25 + k * 9);           // dim right at the root, so the rim stands out
+        const e = ROOM.tentBright * root * (1 - 0.35 * k) * (dz < 0 ? 0.75 : 1);
+        const P = ringAt(1 + k * L * 0.35);
+        const hT = ROOM.hue + 2 + (ROOM.tipHue - ROOM.hue - 2) * Math.pow(k, 1.3) + 4 * Math.sin(g * 0.7 + t * 0.2);
+        tentSplat(x, y, e * base, hueIdx(hT), e * P, 6, k);
+        pulseAdd(x, y, P);
+      });
+    }
+
+    // --- the long ("hypertrophied") tentacle ---
+    // It isn't one of the rim tentacles: it grows from underneath, near the
+    // mouth, and trails far behind in one long, gentle curve — slow, broad
+    // waves travel down it, swinging more toward the tip.
+    {
+      const L = ROOM.longTentacle, LN = 30;
+      const b = spin * 0.3;                                // its base turns slowly with the bell
+      const tg = new Float32Array(LN * 3);
+      for (let j = 0; j < LN; j++) {
+        const k = j / (LN - 1);
+        const grow = Math.pow(k, 0.8);                     // the swing grows toward the tip
+        const tk = t - k * 3;                               // waves travel down it
+        const w1 = grow * (0.35 * Math.sin(k * 3.5 - t * 0.7) + 0.2 * ROOM.tentWild * wander(tk * 0.3, LONG_A));
+        const w2 = grow * (0.25 * Math.cos(k * 3 - t * 0.5 + 1) + 0.2 * ROOM.tentWild * wander(tk * 0.25, LONG_B));
+        toWld(0.12 * Math.cos(b) + w1, 0.02 - L * k, 0.12 * Math.sin(b) + w2, tg, j * 3);
+      }
+      if (!longCh) longCh = { p: new Float32Array(LN * 3), q: new Float32Array(LN * 3), init: false };
+      stepChain(longCh, tg, LN, simDt, ROOM.tentFollow * 0.6, ROOM.tentDrag);
+      drawChain(longCh, LN, L, Math.ceil((L * Rb) / 0.3), (x, y, dz, k) => {
+        const e = ROOM.tentBright * (k < 0.15 ? 2 : 1) * (1 - 0.4 * k) * (dz < 0 ? 0.8 : 1);   // thicker where it starts
+        const P = ringAt(1 + k * L * 0.3);
+        const hT = ROOM.hue + 2 + (ROOM.tipHue - ROOM.hue - 2) * Math.pow(k, 0.9);
+        tentSplat(x, y, e * base, hueIdx(hT), e * P, 7, k * 0.5);
+        pulseAdd(x, y, P);
+      });
+    }
+    room.simT = t;
+
+    // --- 22 sense organs (in the notches between the tentacles) and light organs on the lappets ---
+    for (let g = 0; g < LAPS; g++) {
+      const thS = (g / LAPS) * Math.PI * 2 + spin, thL = ((g + 0.5) / LAPS) * Math.PI * 2 + spin;
+      if (g % 2 === 1) {
+        const [x, y, dz] = proj(0.95 * srR * Math.cos(thS), -0.1 - dropR * 0.8, 0.95 * srR * Math.sin(thS));
+        splat(x, y, ROOM.bellBright * 9 * base * (dz < 0 ? 0.6 : 1), hueIdx(32), 0, 5);
+      }
+      if (g % 2 === 0) {
+        const [x, y, dz] = proj(0.9 * srR * Math.cos(thL), -0.09 - dropR * 0.7, 0.9 * srR * Math.sin(thL));
+        const tw = 0.6 + 0.4 * Math.sin(t * 1.7 + g);
+        splat(x, y, 0, 0, ROOM.bellBright * (4 * tw * base + 14 * alarmFade) * (dz < 0 ? 0.6 : 1), 9);
+        pulseAdd(x, y, 0.6 * alarmFade);
+      }
+    }
+  }
+  ROOM.pulseF = 0.36; // beats per second
+
+  // ----- the room's UI (title, hint, exit button, hover card) -----
+  const roomUI = document.getElementById('room-ui');
+  const roomTip = roomUI && roomUI.querySelector ? roomUI.querySelector('.room-ui__tip') : null;
+
+  function showRoomUI(on) {
+    if (!roomUI || !roomUI.classList) return;
+    roomUI.hidden = !on;
+    if (on) requestAnimationFrame(() => roomUI.classList.add('show'));
+    else roomUI.classList.remove('show');
+  }
+
+  function updateRoomTip() {
+    if (!roomTip) return;
+    const part = PARTS[room.hover];
+    if (!part || room.mode !== 'on') { roomTip.hidden = true; return; }
+    roomTip.hidden = false;
+    roomTip.innerHTML = '<h3>' + part.name + '</h3><p>' + part.text + '</p>';
+    // beside the cursor, kept on screen
+    const pad = 18, w = roomTip.offsetWidth || 280, hgt = roomTip.offsetHeight || 120;
+    let left = room.px + pad, top = room.py + pad;
+    if (left + w > window.innerWidth - 10) left = room.px - w - pad;
+    if (top + hgt > window.innerHeight - 10) top = room.py - hgt - pad;
+    roomTip.style.left = Math.max(10, left) + 'px';
+    roomTip.style.top = Math.max(10, top) + 'px';
+  }
+
+  function enterRoom() {
+    if (room.mode !== 'none') return;
+    release();
+    room.mode = 'enter'; room.p = 0; room.hover = 0; room.alarm = -1;
+    portalHover = false;
+    canvas.style.cursor = 'default';
+    updateNav();
+  }
+
+  function exitRoom() {
+    if (room.mode !== 'on') return;
+    room.mode = 'exit'; room.p = 0; room.hover = 0;
+    showRoomUI(false); updateRoomTip();
+    canvas.style.cursor = 'default';
+  }
+
+  // how visible the scenes and the room are right now (for fading between them)
+  function stepRoom(rdt) {
+    if (room.mode === 'enter') {
+      room.p = Math.min(1, room.p + rdt / ROOM.enter);
+      if (room.p >= 1) { room.mode = 'on'; showRoomUI(true); }
+    } else if (room.mode === 'exit') {
+      room.p = Math.min(1, room.p + rdt / ROOM.exit);
+      if (room.p >= 1) { room.mode = 'none'; updateNav(); }
+    }
+    if (room.alarm >= 0) { room.alarm += rdt; if (room.alarm > ROOM.alarm) room.alarm = -1; }
+    const p = room.p;
+    if (room.mode === 'enter') return { sceneVis: 1 - ease(clamp((p - 0.4) / 0.25, 0, 1)), roomVis: ease(clamp((p - 0.6) / 0.4, 0, 1)) };
+    if (room.mode === 'on') return { sceneVis: 0, roomVis: 1 };
+    if (room.mode === 'exit') return { sceneVis: ease(clamp((p - 0.45) / 0.55, 0, 1)), roomVis: 1 - ease(clamp(p / 0.45, 0, 1)) };
+    return { sceneVis: 1, roomVis: 0 };
+  }
+
+  // run fn with the room's fine grid standing in for the normal one
+  let fine = null;
+  function withFine(fn) {
+    const save = [cols, rows, aspect, cellW, cellH, field, owner];
+    ({ cols, rows, aspect, cellW, cellH, field, owner } = fine);
+    try { return fn(); } finally { [cols, rows, aspect, cellW, cellH, field, owner] = save; }
+  }
+
+  function drawRoom(t, rdt) {
+    withFine(() => {
+      field.fill(0);
+      if (!pulseBuf || pulseBuf.length !== cols * rows) pulseBuf = new Float32Array(cols * rows);
+      pulseBuf.fill(0);
+      if (!cave) makeCave();
+      if (!partMap || partMap.length !== cols * rows) partMap = new Uint8Array(cols * rows);
+      partMap.fill(0);
+      const n = cols * rows;
+      if (!acc || acc.T.length !== n) {
+        const f = () => new Float32Array(n);
+        acc = { T: f(), S: f(), C: f(), N: f(), pw: f(), tmp: f(), expo: 0, cal: 0 };
+      }
+      acc.T.fill(0); acc.S.fill(0); acc.C.fill(0); acc.N.fill(0); acc.pw.fill(0);
+      camY = 0; plotGain = 1;
+      drawCave(t, rdt);
+      drawAtolla(t);
+      toneRoom();
+      roomGlow();
+      roomWaves(t);
+    });
+  }
+
+  // The jellyfish's light spilling into the water: its brightness (and
+  // colour) is spread out over the grid, and wherever that's brighter than
+  // what's there, the cell gets a faint character in the blended colour.
+  // The purple light waves: for each recent beat, a ring spreading out from
+  // the jellyfish, wispy rather than a perfect circle, fading as it grows,
+  // with a soft haze trailing inside it.
+  let wavT = null;
+  function roomWaves(t) {
+    const beatLen = 1 / ROOM.pulseF, nowBeat = Math.floor(t / beatLen);
+    const span = Math.hypot(worldW(), rows);              // far enough to leave the screen
+    const waves = [];
+    for (let b = 0; b < 4; b++) {
+      const age = t - (nowBeat - b) * beatLen;
+      const R = room.Rb * 0.8 + age * ROOM.waveSpeed * rows;
+      if (R > span * 1.1) continue;
+      waves.push({ R, fade: Math.pow(1 - R / (span * 1.1), 1.5) * Math.min(1, age * 3) });
+    }
+    if (!waves.length) return;
+    const w = ROOM.waveWidth * rows, hz = ROOM.waveHaze, top = ROOM.waveBright;
+    const dim = room.hover ? 0.5 : 1;
+    // the wisps' wobble is sin(column part + row part): split with the angle
+    // sum rule so it's a few multiplies per cell instead of two sines
+    if (!wavT || wavT.cols !== cols || wavT.rows !== rows) {
+      const f = (k) => new Float32Array(k);
+      wavT = { cols, rows, s1: f(cols), c1: f(cols), s2: f(cols), c2: f(cols), dx2: f(cols) };
+    }
+    const { s1, c1, s2, c2, dx2 } = wavT;
+    for (let c = 0; c < cols; c++) {
+      const x = c * aspect, a1 = x * 0.11 + t * 0.4, a2 = x * 0.05 - t * 0.3;
+      s1[c] = Math.sin(a1); c1[c] = Math.cos(a1); s2[c] = Math.sin(a2); c2[c] = Math.cos(a2);
+      dx2[c] = (x - room.cx) * (x - room.cx);
+    }
+    const w2 = w * w, hzL = rows * 0.35, nW = waves.length;
+    for (let r = 0; r < rows; r++) {
+      const dy = r - room.cy, dy2 = dy * dy;
+      const sb1 = Math.sin(r * 0.07), cb1 = Math.cos(r * 0.07), sb2 = Math.sin(-r * 0.13), cb2 = Math.cos(-r * 0.13);
+      for (let c = 0; c < cols; c++) {
+        const d = Math.sqrt(dx2[c] + dy2);
+        // wisps: the ring wobbles and its brightness varies around it
+        const wob = (s1[c] * cb1 + c1[c] * sb1) * 0.6 + (s2[c] * cb2 + c2[c] * sb2) * 0.4;
+        let I = 0;
+        for (let j = 0; j < nW; j++) {
+          const wv = waves[j], e = d - wv.R + wob * w * 0.8;
+          let v = e * e < 9 * w2 ? Math.exp(-(e * e) / w2) : 0;        // the wave front
+          if (e < 0) { const hv = hz * Math.exp(e / hzL); if (hv > v) v = hv; }   // the haze behind it
+          I += v * wv.fade;
+        }
+        if (I < 0.01) continue;
+        I *= top * (0.75 + 0.25 * wob) * dim * masterGain;
+        const k = r * cols + c;
+        if (I > field[k]) { field[k] = I; owner[k] = hueIdx(ROOM.waveHue + 14 * wob); }
+      }
+    }
+  }
+
+  // The close glow is worked out on the room's grid; the wide haze (which
+  // also carries the colour) on a half-size copy, which is plenty for
+  // something that soft and much quicker.
+  // where the pulses' light (and the alarm) lights the body — it glows out
+  // from there into the water, in the light's own colour
+  let pulseBuf = null;
+  function pulseAdd(x, y, v) {
+    if (!(v > 0.02)) return;
+    const c = Math.round(x / aspect), r = Math.round(y);
+    if (c < 0 || c >= cols || r < 0 || r >= rows) return;
+    const k = r * cols + c;
+    if (v > pulseBuf[k]) pulseBuf[k] = v;
+  }
+
+  let halo = null;
+  function roomGlow() {
+    const n = cols * rows, hc = Math.ceil(cols / 2), hr = Math.ceil(rows / 2), m = hc * hr;
+    if (!halo || halo.n !== n) {
+      const f = (k) => new Float32Array(k);
+      halo = { n, I: f(n), nI: f(n), t: f(n), wI: f(m), wC: f(m), wS: f(m), bI: f(m), bC: f(m), bS: f(m), p: f(Math.max(cols, rows) + 1), acc: f(cols), hue: new Uint8Array(m), pB: f(n), tick: 0 };
+    }
+    // the light changes slowly, so the spreading is redone every other frame
+    if (halo.tick++ % 2 === 0) spreadGlow(n, hc, hr);
+    const gN = ROOM.glow, gW = ROOM.haze, top = ROOM.glowMax;
+    const pG = ROOM.pulseGlow * masterGain, pTop = ROOM.pulseGlowMax, pHue = hueIdx(ROOM.lightHue);
+    roomBackground(hc);
+    const gc = ROOM.glowChars;
+    if (gc <= 0) return;
+    for (let r = 0; r < rows; r++) {
+      const hrow = (r >> 1) * hc;
+      for (let c = 0; c < cols; c++) {
+        const k = r * cols + c, q = hrow + (c >> 1);
+        let h = gN * halo.nI[k] + gW * halo.bI[q], pg = pG * halo.pB[k];
+        if (h < LIT_MIN && pg < LIT_MIN) continue;
+        h = top * (1 - Math.exp(-h / top));               // eases off toward glowMax
+        pg = pTop * (1 - Math.exp(-pg / pTop));
+        const v = (Math.max(h, pg) + 0.4 * Math.min(h, pg)) * gc;
+        if (v < LIT_MIN || v <= field[k]) continue;
+        field[k] = v;
+        owner[k] = pg > h * 0.7 ? pHue : halo.hue[q];
+      }
+    }
+  }
+  // The water behind the characters, tinted by the light: each cell's
+  // background takes the colour of the glow around it (like the glow of a
+  // lamp in fog), over the water's own dark navy, which darkens with depth.
+  const PRGB = PALETTES.map(([h, sat]) => {
+    const l = 0.5, cc = (1 - Math.abs(2 * l - 1)) * (sat / 100), hp = h / 60, xx = cc * (1 - Math.abs((hp % 2) - 1)), m = l - cc / 2;
+    const [r, g, b] = hp < 1 ? [cc, xx, 0] : hp < 2 ? [xx, cc, 0] : hp < 3 ? [0, cc, xx] : hp < 4 ? [0, xx, cc] : hp < 5 ? [xx, 0, cc] : [cc, 0, xx];
+    return [r + m, g + m, b + m];
+  });
+  function roomBackground(hc) {
+    let B = fine.bg;
+    if (!B || B.c.width !== cols || B.c.height !== rows) {
+      const c = document.createElement('canvas'); c.width = cols; c.height = rows;
+      const x = c.getContext('2d');
+      B = fine.bg = { c, x, img: x.createImageData ? x.createImageData(cols, rows) : { data: new Uint8ClampedArray(cols * rows * 4) } };
+    }
+    const d = B.img.data, base = ROOM.bgBase, gg = ROOM.bgGlow * 150, mg = masterGain;
+    const gN = ROOM.glow, gW = ROOM.haze, pG = ROOM.pulseGlow, pc = PRGB[hueIdx(ROOM.lightHue)];
+    for (let r = 0; r < rows; r++) {
+      const hrow = (r >> 1) * hc, v = (1 - 0.45 * (r / rows)) * mg;
+      for (let c = 0; c < cols; c++) {
+        const k = r * cols + c, q = hrow + (c >> 1);
+        const G = 1 - Math.exp(-(gN * halo.nI[k] + gW * halo.bI[q]) * 2.2);
+        const Gp = 1 - Math.exp(-pG * halo.pB[k] * 0.6);
+        const hcol = PRGB[halo.hue[q]];
+        const o = k * 4;
+        d[o] = (base[0] + gg * (G * hcol[0] + Gp * pc[0])) * v;
+        d[o + 1] = (base[1] + gg * (G * hcol[1] + Gp * pc[1])) * v;
+        d[o + 2] = (base[2] + gg * (G * hcol[2] + Gp * pc[2])) * v;
+        d[o + 3] = 255;
+      }
+    }
+    if (B.x.putImageData) B.x.putImageData(B.img, 0, 0);
+  }
+
+  function spreadGlow(n, hc, hr) {
+    const { I, wI, wC, wS } = halo;
+    wI.fill(0); wC.fill(0); wS.fill(0);
+    for (let r = 0; r < rows; r++) {
+      const hrow = (r >> 1) * hc;
+      for (let c = 0; c < cols; c++) {
+        const k = r * cols + c, o = owner[k], v = field[k];
+        if (o < HUES && v > LIT_MIN) {
+          I[k] = v;
+          const q = hrow + (c >> 1), ang = (o * HUE_STEP * Math.PI) / 180;
+          wI[q] += v * 0.25; wC[q] += v * 0.25 * Math.cos(ang); wS[q] += v * 0.25 * Math.sin(ang);
+        } else I[k] = 0;
+      }
+    }
+    const blur = (src, dst, w, h, ry) => {
+      const rx = Math.max(1, Math.round(ry / aspect));
+      for (let pass = 0; pass < 2; pass++) {
+        boxRows(pass ? dst : src, halo.t, rx, w, h);
+        boxCols(halo.t, dst, ry, w, h);
+      }
+    };
+    blur(I, halo.nI, cols, rows, ROOM.glowR);
+    blur(pulseBuf, halo.pB, cols, rows, ROOM.pulseGlowR);
+    const R2 = Math.max(1, Math.round(ROOM.hazeR / 2));
+    blur(wI, halo.bI, hc, hr, R2); blur(wC, halo.bC, hc, hr, R2); blur(wS, halo.bS, hc, hr, R2);
+    for (let q = 0; q < hc * hr; q++) halo.hue[q] = hueIdx((Math.atan2(halo.bS[q], halo.bC[q]) * 180) / Math.PI);
+  }
+  // running-average box blurs along rows / down columns (edges fade to dark)
+  function boxRows(a, b, r, cols, rows) {
+    const p = halo.p, w = 2 * r + 1;
+    for (let y = 0; y < rows; y++) {
+      const o = y * cols;
+      p[0] = 0;
+      for (let x = 0; x < cols; x++) p[x + 1] = p[x] + a[o + x];
+      for (let x = 0; x < cols; x++) b[o + x] = (p[Math.min(cols, x + r + 1)] - p[Math.max(0, x - r)]) / w;
+    }
+  }
+  // (down columns, but going row by row with a running sum per column — much
+  // kinder to the cache than walking each column)
+  function boxCols(a, b, r, cols, rows) {
+    const acc = halo.acc, w = 2 * r + 1;
+    acc.fill(0, 0, cols);
+    for (let y = 0; y < Math.min(rows, r); y++) { const o = y * cols; for (let x = 0; x < cols; x++) acc[x] += a[o + x]; }
+    for (let y = 0; y < rows; y++) {
+      const yi = y + r, yo = y - r - 1;
+      if (yi < rows) { const o = yi * cols; for (let x = 0; x < cols; x++) acc[x] += a[o + x]; }
+      if (yo >= 0) { const o = yo * cols; for (let x = 0; x < cols; x++) acc[x] -= a[o + x]; }
+      const o = y * cols;
+      for (let x = 0; x < cols; x++) b[o + x] = acc[x] / w;
+    }
+  }
+
+  // which part is under the pointer (looks a little around it, so thin
+  // tentacles are easy to hit)
+  function partAt(px, py) { return fine ? withFine(() => partAtFine(px, py)) : 0; }
+  function partAtFine(px, py) {
+    if (!partMap) return 0;
+    const c0 = Math.round(px / cellW), r0 = Math.round(py / cellH);
+    let best = 0, bestD = Infinity;
+    for (let dr = -4; dr <= 4; dr++) for (let dc = -6; dc <= 6; dc++) {
+      const r = r0 + dr, c = c0 + dc;
+      if (r < 0 || r >= rows || c < 0 || c >= cols) continue;
+      const p = partMap[r * cols + c];
+      if (!p) continue;
+      const d = dr * dr + (dc * aspect) * (dc * aspect);
+      if (d < bestD) { bestD = d; best = p; }
+    }
+    return best;
+  }
+
+  if (roomUI && roomUI.querySelector) roomUI.querySelector('.room-ui__exit').addEventListener('click', exitRoom);
+
   const SPECIES = { scypho: Scypho, cubo: Cubo, stauro: Stauro, hydro: Hydro, siphono: Siphono,
                     polyp: POLYP_VIEW, ephyra: EPHYRA_VIEW };
 
@@ -3018,6 +3957,8 @@
     makeSnow();
     makeScenery();
     makeStreaks();
+    cave = null;
+    room.mode = 'none'; showRoomUI(false);
     updateNav();
   }
 
@@ -3028,7 +3969,7 @@
     if (!navEl) return;
     const i = SCENE_ORDER.indexOf(scene);
     const busy = focus.mode !== 'none' || scrollBusy();
-    navEl.classList.toggle('is-hidden', focus.mode !== 'none');
+    navEl.classList.toggle('is-hidden', focus.mode !== 'none' || room.mode !== 'none');
     navEl.innerHTML = `
       ${i > 0 ? `<button type="button" data-dir="-1" ${busy ? 'disabled' : ''}>↑ ${SCENE_LABEL[SCENE_ORDER[i - 1]]}</button>` : ''}
       <span class="scene-nav__here">${SCENE_LABEL[scene]}</span>
@@ -3049,6 +3990,8 @@
 
     field.fill(0);
     stepScroll(rdt); // scroll position first, so everything this frame uses it
+    const vis = stepRoom(rdt);
+    masterGain = vis.sceneVis;   // the scenes keep running in the cave, just unseen
     drawEnvironment(t, dt);
 
     stepFocus(rdt);
@@ -3113,6 +4056,8 @@
     }
     camY = 0;
     drawSpeedLines(rdt);
+    masterGain = 1;
+    if (vis.roomVis > 0) { masterGain = vis.roomVis; drawRoom(t, rdt); masterGain = 1; }
 
     // render the grid
     ctx.globalCompositeOperation = 'source-over';
@@ -3120,19 +4065,30 @@
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.globalCompositeOperation = 'lighter';
 
+    if (vis.roomVis > 0 && fine.bg) {
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(fine.bg.c, 0, 0, fine.cols * fine.cellW * dpr, fine.rows * fine.cellH * dpr);
+    }
+    renderGrid(field, owner, cols, rows, cellW, cellH, atlas, pad, gw, gh, null);
+    if (vis.roomVis > 0) renderGrid(fine.field, fine.owner, fine.cols, fine.rows, fine.cellW, fine.cellH, fine.atlas, fine.pad, fine.gw, fine.gh, fine.glyph);
+
+    requestAnimationFrame(frame);
+  }
+
+  function renderGrid(field, owner, cols, rows, cellW, cellH, atlas, pad, gw, gh, glyph) {
     for (let r = 0; r < rows; r++) {
       const dy = (r * cellH - pad) * dpr;
       for (let col = 0; col < cols; col++) {
         const k = r * cols + col;
         const I = field[k];
         if (I < 0.04) continue;
-        const l = Math.min(LEVELS - 1, Math.max(1, Math.round(I * (LEVELS - 1))));
+        let l = Math.min(LEVELS - 1, Math.max(1, Math.round(I * (LEVELS - 1))));
+        if (glyph && glyph[k]) { if (glyph[k] === 255) continue; l = glyph[k]; }   // a strand character
         ctx.drawImage(atlas, l * gw, owner[k] * gh, gw, gh,
                       (col * cellW - pad) * dpr, dy, gw, gh);
       }
     }
-
-    requestAnimationFrame(frame);
   }
 
   let resizeTimer;
