@@ -159,6 +159,10 @@
   let countLit = false, litOwn = 0, litView = 0;
   let countOnly = false;  // count what would be lit, but don't draw it
 
+  // how visible the jellyfish are (everything else is unaffected) — they
+  // fade out as you swim in to the tiny Atolla, so it's the only one left
+  let creatureGain = 1;
+
   function plot(wx, wy, I, p) {
     const c = Math.round(wx / aspect);
     if (!(c >= 0 && c < cols)) return;                  // (also rejects NaN)
@@ -172,6 +176,7 @@
     if (countOnly) return;
     const k = r * cols + c;
     I *= plotGain * masterGain;
+    if (countLit) I *= creatureGain;      // (the jellyfish fade out while you swim in to the tiny Atolla)
     if (I > field[k]) {
       field[k] = I;
       owner[k] = p;
@@ -580,7 +585,7 @@
     }
     if (focus.mode !== 'none' || scrollBusy()) return; // no dragging while zoomed / scrolling
     const [wx, wy] = toWorldPt(e);
-    if (hitPortal(wx, wy)) { enterRoom(); return; }      // the portal to the cave
+    if (hitPortal(wx, wy)) { enterRoom(); return; }      // the tiny Atolla: swim in to the cave
     const hs = hitScenery(wx, wy);      // small things first: a polyp or baby jellyfish
     if (!hs && hitVent(wx, wy)) { tapVent(); return; } // the vent: build up pressure
     const j = hs ? null : hitTest(wx, wy, true);
@@ -639,15 +644,12 @@
           // its spin, for when you let go (smoothed)
           room.wx = room.wx * 0.5 + (ax / dts) * 0.5; room.wy = room.wy * 0.5 + (ay / dts) * 0.5;
           tr.x = e.clientX; tr.y = e.clientY; tr.t = now;
-          room.idle = 0; room.hover = 0;
+          room.idle = 0;
           canvas.style.cursor = 'grabbing';
-          updateRoomTip();
           return;
         }
       }
-      room.hover = room.mode === 'on' ? partAt(e.clientX, e.clientY) : 0;
-      canvas.style.cursor = room.mode !== 'on' ? 'default' : room.hover ? 'pointer' : 'grab';
-      updateRoomTip();
+      canvas.style.cursor = room.mode !== 'on' ? 'default' : 'grab';   // (parts are picked in the side panel)
       return;
     }
     const [wx, wy] = toWorldPt(e);
@@ -2543,16 +2545,25 @@
   }
 
   // ================= 2. BOX JELLY (Cubozoa) =================
-  // Seen in three-quarter view: two front corners at the sides, two back
-  // corners showing faintly through the body. A flat blade (pedalium) hangs
-  // from each corner with a bundle of tentacles. Eyes sit on each face.
-  // Box jellies pulse fast and steer.
+  // Seen from the front, turned a little: two front corners at the sides,
+  // two back corners showing faintly through the body (shifted over by the
+  // turn, so the back face doesn't hide behind the front one). A flat blade
+  // (pedalium) hangs from each corner with a bundle of tentacles. One eye
+  // cluster (rhopalium) sits in the middle of each of the 4 faces — front,
+  // back (seen through) and the two sides. Box jellies pulse fast and steer.
 
+  const BOX_TURN = 0.2;                // how far it's turned (moves the back face over)
+  const BOX_BACK = 0.38;               // half-width of the back face (smaller: it's further away)
   const BOX_CORNERS = [
-    { x: -1, front: true }, { x: -0.38, front: false },
-    { x: 0.38, front: false }, { x: 1, front: true },
+    { x: -1, front: true }, { x: -BOX_BACK - BOX_TURN, front: false },
+    { x: BOX_BACK - BOX_TURN, front: false }, { x: 1, front: true },
   ];
-  const BOX_EYES = [{ x: -0.69, front: true }, { x: 0.69, front: true }, { x: 0, front: false }];
+  const BOX_EYES = [
+    { x: 0, front: true },                                  // front face
+    { x: -BOX_TURN, front: false },                         // back face, through the body
+    { x: (-1 - BOX_BACK - BOX_TURN) / 2, front: true },     // left side
+    { x: (1 + BOX_BACK - BOX_TURN) / 2, front: true },      // right side
+  ];
 
   const Cubo = {
     make(initialY) {
@@ -2603,7 +2614,7 @@
           add(0.07, -0.2);
           add(0.28 * Math.exp(e / 0.14), 0);
           // back corner edges, seen through the body
-          if (ny > -h * 0.8) add(0.16 * gauss(ax - 0.38, w), 0.4);
+          if (ny > -h * 0.8) add(0.16 * gauss(Math.abs(nx + BOX_TURN) - BOX_BACK, w), 0.4);
           // manubrium (stomach) hanging from the top centre
           if (ny > -0.75 * h && ny < 0.02) {
             const q = (ny + 0.75 * h) / (0.75 * h);
@@ -2618,7 +2629,7 @@
         flush(j, col, r, t);
       });
 
-      // eyes (rhopalia): a bright pair on each visible face
+      // eyes (rhopalia): one cluster on each of the 4 faces (the back one dimmer)
       for (const eye of BOX_EYES) {
         const dim = eye.front ? 1 : 0.5;
         const [x, y] = toWorld(j, eye.x * R * sx, (botY - 0.25) * R * sy);
@@ -3069,16 +3080,16 @@
 
 
   // ================= the deep-sea cave room (Atolla) =================
-  // A portal hangs in the open water. Click it and it swirls open and takes
-  // you to a dark sea cave with one huge Atolla jellyfish in the middle,
+  // A tiny Atolla drifts in the open water. Click it and you swim in close —
+  // to a dark sea cave with one huge Atolla jellyfish in the middle,
   // gently pulsing and turning (not draggable). Hover over its parts to learn
   // about them; click it to set off its blue "burglar alarm" light display.
   // "Swim back out" (or Esc) returns you to the open water. The other scenes
   // keep running while you're in here.
 
   const ROOM = {
-    enter: 1.3,        // seconds for the portal to pull you in
-    exit: 1.0,         // seconds to swim back out
+    enter: 1.6,        // seconds to go in: the jellyfish and the tiny Atolla fade away, then the big Atolla fades in
+    exit: 1.2,         // seconds to come out: the big Atolla fades away, then the jellyfish and the tiny one fade back in
     hue: 354,          // Atolla's deep crimson
     // which way it's swimming (x right, y up, z toward you): nearly straight
     // up (leaning slightly left) and a little away from the camera — a fairly side-on view, just
@@ -3094,6 +3105,8 @@
     tentThick: 1,      // how thick the tentacles are drawn (0 = one thin line)
     backSide: 1.2,     // how much the far side of the bell shows through (1 = as bright as the near side)
     outline: 0.9,      // how crisp the edges are (0 = soft; higher = more outlined)
+    highlight: 2.4,    // how much brighter the part picked in the side panel gets
+    highlightDim: 0.12, // and how faint everything else goes meanwhile
     rimBright: 3.5,    // how brightly the bell's rim glows (marks where the bell ends)
     sag: 0.35,         // how much the tentacles droop under their own weight
     tentLen: 1,        // rim tentacle length (× bell radius, roughly) — the long tentacle is set separately
@@ -3105,6 +3118,7 @@
     surge: 0.1,        // how far each beat pushes it forward (× bell radius) before it glides back
     tentWild: 1.1,     // how much the tentacles move about (0 = still)
     size: 1.35,        // how big the jellyfish is
+    across: 0.64,      // where it sits across the screen (0 left … 1 right) — clear of the side panel
     turnSpeed: 0.004,  // how far it turns per pixel you drag (radians)
     turnMax: 5,        // fastest it can spin (radians per second) — so the tentacles don't whip
     turnCoast: 2.5,    // how quickly a flick's spin dies away after you let go (higher = sooner)
@@ -3138,7 +3152,7 @@
     wobble: 0.06,      // how much the view drifts about
     glowChars: 0.35,   // how strongly the glow shows as faint characters in the water (0 = none)
     bgGlow: 0.6,       // how strongly the glow tints the water behind the characters
-    bgBase: [3, 4, 14], // the water's own colour (dark navy; red, green, blue 0–255), darker toward the bottom
+    bgBase: [0, 0, 0], // a colour wash over the water behind it (red, green, blue 0–255; 0 = just the open water)
     longTentacle: 6,   // length of the long tentacle (× bell radius) — real ones reach 1.5–36× the bell's width
     alarm: 3.2,        // seconds the light display lasts
   };
@@ -3171,43 +3185,120 @@
   let partMap = null;  // which part of the Atolla each cell shows (for hovering)
   let curPart = 0;
 
-  // ----- the portal (open-water scenery) -----
-  const portal = () => ({ x: worldW() * 0.86, y: rows * 0.42, R: rows * 0.085 });
+  // ----- the tiny Atolla (open-water scenery: the way into the room) -----
+  // A tiny Atolla drifts in the open water — a few characters of glowing red
+  // bell with little swaying tentacles, beating in time with the big one.
+  // Every beat it sends a small, faint ring of purple light out around it.
+  // Click it to swim in close.
+  const TINY = {
+    size: 0.6,         // its bell's half-width (rows)
+    flashFade: 4,      // how quickly each beat's purple fades back to red (higher = shorter flash)
+    waveBright: 0.12,  // how bright its purple rings are (keep it dim)
+    waveReach: 1,      // how far a ring spreads before it fades out (screen heights)
+    waveSpeed: 0.38,   // how fast it spreads (screen heights per second)
+  };
+  // where it is: a random spot in the open water (as fractions of the screen,
+  // kept clear of the edges and the depth buttons), picked once when the
+  // page loads
+  const tinyAt = { fx: rand(0.12, 0.8), fy: rand(0.2, 0.78) };
+  const portal = () => ({ x: worldW() * tinyAt.fx, y: rows * tinyAt.fy + Math.sin(simTimeNow() * 0.4) * 0.6, R: Math.max(2.2, TINY.size * 1.6) });
   let portalHover = false;
+  let tinyT = 0;
+  const simTimeNow = () => tinyT;
 
   function hitPortal(wx, wy) {
     if (scene !== 'openWater' || room.mode !== 'none' || focus.mode !== 'none' || scrollBusy()) return false;
     const P = portal();
-    return Math.hypot((wx - P.x) / P.R, (wy - P.y) / P.R) < 1.25;
+    return Math.hypot((wx - P.x) / P.R, (wy - P.y - P.R * 0.4) / (P.R * 1.3)) < 1.2;   // (taller: it has tentacles)
   }
 
   function drawPortal(t) {
+    tinyT = t;
+    // (once it starts growing, the big one takes over in its place; until
+    // then — while the other jellyfish fade — it stays just as it is)
+    const hand = 1 - (room.fade || 0);                    // (fades away as you go in, back as you come out)
+    if (hand <= 0) return;
     const P = portal();
-    // grows and spins up while it pulls you in
-    const pull = room.mode === 'enter' ? ease(Math.min(1, room.p / 0.55)) : 0;
-    const R = P.R * (1 + pull * 9), spinF = 1 + pull * 6;
-    const glow = (portalHover ? 1.25 : 1) * (0.85 + 0.15 * Math.sin(t * 2.2));
-    const n = Math.ceil((Math.PI * 2 * R) / 0.5);
-    for (let i = 0; i < n; i++) {
-      const th = (i / n) * Math.PI * 2;
-      // outer ring, crimson, turning one way
-      const a1 = th + t * 0.5 * spinF;
-      const w1 = 0.6 + 0.4 * Math.sin(th * 7 - t * 3 * spinF);
-      plot(P.x + Math.cos(a1) * R, P.y + Math.sin(a1) * R, 0.55 * w1 * glow, hueIdx(354));
-      // inner ring, violet-blue, the other way
-      const a2 = th - t * 0.8 * spinF, r2 = R * 0.78;
-      if (i % 2 === 0) plot(P.x + Math.cos(a2) * r2, P.y + Math.sin(a2) * r2, 0.35 * (0.6 + 0.4 * Math.sin(th * 5 + t * 4)) * glow, hueIdx(255));
-    }
-    // a faint swirl spiralling into the dark middle, with blue sparks
-    for (let arm = 0; arm < 3; arm++) {
-      for (let k = 0; k < 1; k += 0.03) {
-        const a = arm * 2.094 + k * 5 - t * 1.4 * spinF, r = R * 0.7 * (1 - k);
-        plot(P.x + Math.cos(a) * r, P.y + Math.sin(a) * r, 0.22 * (1 - k * 0.6) * glow, hueIdx(280 - 60 * k));
+    const beatLen = 1 / ROOM.pulseF;
+    const ph = (((t % beatLen) + beatLen) % beatLen) / beatLen;
+    const sq = Math.sin(Math.PI * Math.pow(Math.min(1, ph / 0.42), 0.7)), c = sq * sq;   // the squeeze, like the big one
+    // swimming in close: it grows toward you as you go in
+    const pull = 0;                                      // (it no longer grows itself — the big one does)
+    const S = TINY.size;
+    const glow = hand;                                    // (looks the same whether or not you hover it)
+    const lift = c * 0.25;                                // each beat nudges it up a touch
+    const cx = P.x, cy = P.y - lift;
+    const hw = S * (1 - 0.18 * c), hh = S * 0.55 * (1 + 0.12 * c);
+    // Each beat the whole thing lights up purple — bell first, then down the
+    // tentacles — and fades back to red. f: how purple it is (0 red … 1 purple).
+    const purpleAt = (delay) => { const q = Math.max(0, ph - delay); return Math.exp(-q * TINY.flashFade); };
+    const tint = (base, f) => hueIdx(base + (ROOM.lightHue - base) * f);
+    const fB = purpleAt(0);
+    // Normally it's just a single glowing character — red, flashing purple on
+    // each beat. (Its full shape only shows as you swim in to it.)
+    if (pull === 0) plot(cx, cy, Math.min(1, 0.7 * glow * (1 + 0.4 * fB) * (0.85 + 0.15 * c)), tint(354, fB));
+    else
+    // the bell: a little dome, brightest round its edge and rim
+    for (let dy = -Math.ceil(hh); dy <= 0.5; dy += 0.5) {
+      const v = Math.min(1, -dy / hh);                    // 0 at the rim … 1 at the top
+      const w = hw * Math.sqrt(Math.max(0, 1 - v * v));
+      for (let dx = -w; dx <= w + 0.01; dx += aspect * 0.5) {
+        const e = Math.abs(dx) / Math.max(0.5, w);
+        const I = (0.35 + 0.35 * e * e + (dy > -0.6 ? 0.35 : 0)) * glow * (1 + 0.5 * fB);
+        plot(cx + dx, cy + dy, I, tint(dy > -0.6 ? 362 : 354, fB));
       }
     }
-    for (let i = 0; i < 6; i++) {
-      const a = t * 1.3 + i * 1.7, r = R * (0.3 + 0.6 * ((t * 0.37 + i * 0.19) % 1));
-      plot(P.x + Math.cos(a) * r, P.y + Math.sin(a) * r, 0.7 * glow, hueIdx(205));
+    if (pull > 0) {
+    // little tentacles hanging from the rim, swaying and trailing the beat
+    const nT = 4;
+    for (let i = 0; i < nT; i++) {
+      const u = (i + 0.5) / nT * 2 - 1;                   // across the rim, −1 … 1
+      const L = S * (1.2 + 0.4 * Math.sin(i * 2.3));
+      for (let k = 0; k <= 1.001; k += 0.5 / L) {
+        const ck = Math.max(0, Math.sin(Math.PI * Math.pow(Math.min(1, (((ph - k * 0.12) % 1 + 1) % 1) / 0.42), 0.7)));
+        const x = cx + u * hw * (0.9 - 0.35 * k * ck) + Math.sin(t * 1.2 + i * 1.9 + k * 3) * 0.35 * k * S;
+        const f = purpleAt(0.05 + k * 0.12);
+        plot(x, cy + 0.4 + k * L, (0.42 - 0.22 * k) * glow * (1 + 0.5 * f), tint(350 - 8 * k, f));
+      }
+    }
+    // and its long tentacle, from the middle
+    for (let k = 0; k <= 1.001; k += 0.5 / (S * 3)) {
+      const f = purpleAt(0.05 + k * 0.2);
+      plot(cx + Math.sin(t * 0.7 + k * 2.5) * 0.5 * k * S, cy + 0.3 + k * S * 3, (0.3 - 0.18 * k) * glow * (1 + 0.5 * f), tint(348, f));
+    }
+    }
+
+    // its light across the whole screen: each beat, a faint purple ring
+    // spreads out from it and fades, leaving a dim haze behind
+    // (only while the open water is on screen)
+    if (pull > 0.9 || room.mode === 'on' || (scene !== 'openWater' && !scrollBusy())) return;
+    const span = TINY.waveReach * rows;                    // how far a ring gets before it's gone
+    const waves = [];
+    const nowBeat = Math.floor(t / beatLen);
+    for (let bI = 0; bI < 3; bI++) {
+      const age = t - (nowBeat - bI) * beatLen, R = S + age * TINY.waveSpeed * rows;
+      if (R < span) waves.push({ R, fade: Math.pow(1 - R / span, 1.5) * Math.min(1, age * 4) });
+    }
+    if (!waves.length) return;
+    const wd = Math.max(0.5, rows * 0.015), top = TINY.waveBright * (1 - pull) * hand;
+    const nW = waves.length;
+    // a clean circle round it (only the cells it could reach)
+    const r0 = Math.max(0, Math.floor(cy - span)), r1 = Math.min(rows - 1, Math.ceil(cy + span));
+    const c0 = Math.max(0, Math.floor((cx - span) / aspect)), c1 = Math.min(cols - 1, Math.ceil((cx + span) / aspect));
+    for (let r = r0; r <= r1; r++) {
+      const dy = r - cy, dy2 = dy * dy;
+      for (let col = c0; col <= c1; col++) {
+        const dx = col * aspect - cx, d = Math.sqrt(dx * dx + dy2);
+        if (d > span) continue;
+        let I = 0;
+        for (let j = 0; j < nW; j++) {
+          const wv = waves[j], e = d - wv.R;
+          let v = e * e < 9 * wd * wd ? Math.exp(-(e * e) / (wd * wd)) : 0;
+          if (e < 0) v = Math.max(v, 0.2 * Math.exp(e / (span * 0.25)));   // a faint glow just inside it
+          I += v * wv.fade;
+        }
+        if (I * top > 0.041) plot(col * aspect, r, I * top, hueIdx(ROOM.waveHue));
+      }
     }
   }
 
@@ -3291,7 +3382,7 @@
   let acc = null;
   const PCOS = PALETTES.map(([h]) => Math.cos((h * Math.PI) / 180)), PSIN = PALETTES.map(([h]) => Math.sin((h * Math.PI) / 180));
   function splat(x, y, eB, pal, eL, part) {
-    if (room.hover) { const m = part === room.hover ? 1.5 : 0.4; eB *= m; eL *= m; }  // hovered part lights up, the rest dims
+    if (room.hover) { const m = part === room.hover ? ROOM.highlight : ROOM.highlightDim; eB *= m; eL *= m; }  // the part picked in the panel lights up, the rest fades right back
     const fc = x / aspect, fr = y;
     const c0 = Math.floor(fc), r0 = Math.floor(fr);
     if (!(c0 >= -1 && c0 < cols && r0 >= -1 && r0 < rows)) return;
@@ -3315,7 +3406,8 @@
     const n = cols * rows, T = acc.T, S = acc.S;
     // exposure: set so the brightest ~0.7% of lit cells reach the top of the
     // ramp, re-checked now and then and eased toward
-    if (acc.cal-- <= 0) {
+    if (room.mode === 'enter' || room.mode === 'exit') acc.cal = 0;   // (keep up while it grows / shrinks)
+    if (!room.hover && acc.cal-- <= 0) {   // (held still while a part's highlighted, or it would undo the dimming)
       let m = 0; const tmp = acc.tmp;
       for (let k = 0; k < n; k++) { const v = T[k] + S[k]; if (v > 0) tmp[m++] = v; }
       if (m > 20) {
@@ -3416,8 +3508,12 @@
   const LONG_A = [0.4, 2.1, 4.4], LONG_B = [1.7, 5.2, 0.9];
 
   function drawAtolla(t) {
+    if (room.mode !== 'on' && (room.grow || 0) <= 0.02) return;   // (still the tiny one — not grown yet)
     const W = worldW();
-    const Rb = Math.min(W * 0.17, rows * 0.3) * ROOM.size; // bell radius (the tentacles make up the length)
+    const RbFull = Math.min(W * 0.17, rows * 0.3) * ROOM.size;
+    // growing from the tiny one (its size and spot) to full size, smoothly
+    const g = room.grow == null ? 1 : room.grow, TP = portal(), Rt = 0.4 * ROOM.detail;   // (starts about one character big)
+    const Rb = Rt * Math.pow(RbFull / Rt, g);             // bell radius (the tentacles make up the length)
     const beatLen = 1 / ROOM.pulseF;
     // the beat: a quick squeeze, then a slow refill (0 relaxed … 1 squeezed)
     const pulseAt = (tt) => {
@@ -3435,7 +3531,7 @@
       const q = (ph - 0.2) / 0.8; return 1 - q * q * (3 - 2 * q);                       // slow glide back while it refills
     };
     const fwd = surgeAt(t - 0.25);                         // (in step with the rim's squeeze)
-    const cx0 = W * 0.45, cy0 = rows * 0.31;
+    const cx0 = TP.x + (W * ROOM.across - TP.x) * g, cy0 = TP.y + (rows * 0.31 - TP.y) * g;
     const spin = t * ROOM.spin;
 
     // its own frame: a = the way it swims, e1 / e2 = across the bell. The
@@ -3702,9 +3798,23 @@
   }
   ROOM.pulseF = 0.36; // beats per second
 
-  // ----- the room's UI (title, hint, exit button, hover card) -----
+  // ----- the room's UI: the side panel (same design as the zoom-in info
+  // panel) and the exit button. Hover a part in the panel's list to see it
+  // lit up on the jellyfish, with what it is below the list. -----
   const roomUI = document.getElementById('room-ui');
-  const roomTip = roomUI && roomUI.querySelector ? roomUI.querySelector('.room-ui__tip') : null;
+  const roomParts = roomUI && roomUI.querySelector ? roomUI.querySelector('.room-info__parts') : null;
+  const roomDetail = roomUI && roomUI.querySelector ? roomUI.querySelector('.room-info__detail') : null;
+  if (roomParts) {
+    roomParts.innerHTML = Object.keys(PARTS).map((id) =>
+      `<li><button type="button" data-part="${id}">${PARTS[id].name}</button></li>`).join('');
+    roomParts.querySelectorAll('[data-part]').forEach((b) => {
+      const on = () => { room.hover = +b.dataset.part; updateRoomTip(); };
+      b.addEventListener('mouseenter', on);
+      b.addEventListener('focus', on);
+      b.addEventListener('mouseleave', () => { room.hover = 0; updateRoomTip(); });
+      b.addEventListener('blur', () => { room.hover = 0; updateRoomTip(); });
+    });
+  }
 
   function showRoomUI(on) {
     if (!roomUI || !roomUI.classList) return;
@@ -3713,20 +3823,17 @@
     else roomUI.classList.remove('show');
   }
 
+  // the panel's detail section and highlighted button follow room.hover
   function updateRoomTip() {
-    if (!roomTip) return;
+    if (roomParts) roomParts.querySelectorAll('[data-part]').forEach((b) =>
+      b.classList.toggle('is-current', +b.dataset.part === room.hover));
+    if (!roomDetail) return;
     const part = PARTS[room.hover];
-    if (!part || room.mode !== 'on') { roomTip.hidden = true; return; }
-    roomTip.hidden = false;
-    roomTip.innerHTML = '<h3>' + part.name + '</h3><p>' + part.text + '</p>';
-    // beside the cursor, kept on screen
-    const pad = 18, w = roomTip.offsetWidth || 280, hgt = roomTip.offsetHeight || 120;
-    let left = room.px + pad, top = room.py + pad;
-    if (left + w > window.innerWidth - 10) left = room.px - w - pad;
-    if (top + hgt > window.innerHeight - 10) top = room.py - hgt - pad;
-    roomTip.style.left = Math.max(10, left) + 'px';
-    roomTip.style.top = Math.max(10, top) + 'px';
+    roomDetail.innerHTML = part
+      ? `<p class="info__eyebrow">Part ${room.hover} of ${Object.keys(PARTS).length}</p><h3>${part.name}</h3><p>${part.text}</p>`
+      : `<p class="info__latin">Hover over a part above to light it up on the jellyfish.</p>`;
   }
+  updateRoomTip();
 
   function enterRoom() {
     if (room.mode !== 'none') return;
@@ -3773,10 +3880,19 @@
       }
     }
     const p = room.p;
-    if (room.mode === 'enter') return { sceneVis: 1 - ease(clamp((p - 0.4) / 0.25, 0, 1)), roomVis: ease(clamp((p - 0.6) / 0.4, 0, 1)) };
-    if (room.mode === 'on') return { sceneVis: 0, roomVis: 1 };
-    if (room.mode === 'exit') return { sceneVis: ease(clamp((p - 0.45) / 0.55, 0, 1)), roomVis: 1 - ease(clamp(p / 0.45, 0, 1)) };
-    return { sceneVis: 1, roomVis: 0 };
+    // The open water stays as the background the whole time; the tiny Atolla
+    // grows (room.grow: 0 tiny … 1 full size) into the big one in its place,
+    // and shrinks back when you leave. Only the other jellyfish fade.
+    // it grows (and shrinks back) while the other jellyfish fade out (and in)
+    // A cross-fade, with the open water staying as it is behind: going in,
+    // the other jellyfish and the tiny Atolla fade away (first half), then
+    // the full-size Atolla fades in (second half). Coming out, the reverse.
+    // room.fade: how far the tiny side has faded (0 … 1).
+    room.grow = room.mode === 'on' ? 1 : room.mode === 'enter' ? (p >= 0.5 ? 1 : 0) : room.mode === 'exit' ? (p < 0.5 ? 1 : 0) : 0;
+    room.fade = room.mode === 'enter' ? ease(clamp(p / 0.5, 0, 1)) : room.mode === 'exit' ? 1 - ease(clamp((p - 0.5) / 0.5, 0, 1)) : room.mode === 'on' ? 1 : 0;
+    // (as it starts growing, the big one fades in while the tiny one fades out)
+    const roomVis = room.mode === 'on' ? 1 : room.mode === 'enter' ? ease(clamp((p - 0.5) / 0.5, 0, 1)) : room.mode === 'exit' ? 1 - ease(clamp(p / 0.5, 0, 1)) : 0;
+    return { sceneVis: 1, roomVis };
   }
 
   // run fn with the room's fine grid standing in for the normal one
@@ -3802,7 +3918,6 @@
       }
       acc.T.fill(0); acc.S.fill(0); acc.C.fill(0); acc.N.fill(0); acc.pw.fill(0);
       camY = 0; plotGain = 1;
-      drawCave(t, rdt);
       drawAtolla(t);
       toneRoom();
       roomGlow();
@@ -4082,6 +4197,8 @@
     stepScroll(rdt); // scroll position first, so everything this frame uses it
     const vis = stepRoom(rdt);
     masterGain = vis.sceneVis;   // the scenes keep running in the cave, just unseen
+    // while it grows toward you, the other jellyfish fade away first
+    creatureGain = 1 - (room.fade || 0);                 // (the other jellyfish fade with the tiny Atolla)
     drawEnvironment(t, dt);
 
     stepFocus(rdt);

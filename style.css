@@ -23,9 +23,11 @@ html, body {
   --muted: #8fa3b5;
   --panel: rgba(4, 10, 20, 0.72);
 
+  /* pinned by its top edge (not centred), so when its text changes length
+     the panel doesn't shift and the buttons stay put under the mouse */
   position: fixed;
   left: 4vw;
-  top: 50%;
+  top: 6vh;
   width: min(36vw, 460px);
   max-height: 88vh;
   overflow-y: auto;
@@ -42,12 +44,12 @@ html, body {
   backdrop-filter: blur(4px);
 
   opacity: 0;
-  transform: translate(-12px, -50%);
+  transform: translateX(-12px);
   transition: opacity 0.5s ease, transform 0.5s ease;
 }
 .info.show {
   opacity: 1;
-  transform: translate(0, -50%);
+  transform: none;
 }
 .info[hidden] { display: none; }
 
@@ -218,27 +220,22 @@ html, body {
 .room-ui.show { opacity: 1; }
 .room-ui[hidden] { display: none; }
 
-.room-ui__title {
-  position: absolute;
-  left: 4vw;
-  top: 4vh;
-  max-width: 360px;
+/* the side panel: the same look as the zoom-in info panel (.info), in the
+   Atolla's crimson */
+.room-info {
+  --accent: hsl(354, 80%, 65%);
+  pointer-events: auto;
 }
-.room-ui__eyebrow {
-  margin: 0;
-  font-size: 11px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: #ff6b7a;
+.room-info .info__eyebrow + .room-info__parts { margin-top: 8px; }
+.room-info__parts button { cursor: default; }
+/* the part you're hovering (or, after you leave the list, none) */
+.room-info__parts button.is-current {
+  color: #000;
+  background: var(--accent);
+  border-color: var(--accent);
 }
-.room-ui__title h2 {
-  margin: 4px 0 2px;
-  font-size: 26px;
-  font-weight: 600;
-  color: #fff;
-}
-.room-ui__latin { margin: 0 0 10px; font-style: italic; color: #a7949a; }
-.room-ui__hint { margin: 0; font-size: 12px; color: #a7949a; }
+.room-info__detail { min-height: 7.5em; }
+.room-info__detail .info__latin { margin-bottom: 0; }
 
 .room-ui__exit {
   position: absolute;
@@ -256,17 +253,3 @@ html, body {
 }
 .room-ui__exit:hover { color: #fff; border-color: #ff6b7a; }
 
-/* the card that follows the cursor over a part */
-.room-ui__tip {
-  position: absolute;
-  max-width: 280px;
-  padding: 12px 14px;
-  font-size: 13px;
-  line-height: 1.45;
-  background: rgba(14, 4, 8, 0.85);
-  border: 1px solid #ff6b7a;
-  border-radius: 8px;
-}
-.room-ui__tip[hidden] { display: none; }
-.room-ui__tip h3 { margin: 0 0 4px; font-size: 15px; color: #ff9aa5; }
-.room-ui__tip p { margin: 0; }

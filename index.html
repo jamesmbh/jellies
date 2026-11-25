@@ -17,16 +17,21 @@
        Filled in by jellyfish.js. -->
   <nav id="scene-nav" class="scene-nav" aria-label="Depth"></nav>
 
-  <!-- The deep-sea cave room (through the portal in open water). -->
+  <!-- The deep-sea room (through the tiny Atolla in open water). The side
+       panel uses the same design as the zoom-in info panel; its list of
+       parts is filled in by jellyfish.js from PARTS. -->
   <div id="room-ui" class="room-ui" hidden>
-    <div class="room-ui__title">
-      <p class="room-ui__eyebrow">Deep sea · usually 500–1,500 m down</p>
+    <aside class="info show room-info" aria-label="Atolla jellyfish">
+      <p class="info__eyebrow">Deep sea · usually 500–1,500 m down</p>
       <h2>Atolla jellyfish</h2>
-      <p class="room-ui__latin">Atolla wyvillei · bell up to ~15 cm across</p>
-      <p class="room-ui__hint">Hover over its parts to learn about them · drag to turn it round · click it to set off its alarm</p>
-    </div>
+      <p class="info__latin">Atolla wyvillei · bell up to ~15 cm across</p>
+      <p>A crown jellyfish of the deep, deep red so it's almost invisible down where no sunlight reaches — and it makes its own blue light.</p>
+      <p class="info__eyebrow">Its parts</p>
+      <ul class="info__sections room-info__parts" aria-label="Parts of the Atolla — hover one to see it"></ul>
+      <section class="info__species room-info__detail" aria-live="polite"></section>
+      <p class="info__hint">Hover a part above to see it on the jellyfish · drag to turn it round · click it to set off its alarm · Esc to swim back out</p>
+    </aside>
     <button class="room-ui__exit" type="button">← Swim back out</button>
-    <div class="room-ui__tip" hidden></div>
   </div>
 
   <script src="jellyfish.js"></script>
